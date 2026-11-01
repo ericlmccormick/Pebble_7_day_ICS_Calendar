@@ -19,7 +19,10 @@
       "ICAL_URL",
       "ICAL_URL_2",
       "ICAL_URL_3",
-      "SYNC_STATUS"
+      "SYNC_STATUS",
+      "ICAL_COLOR_1",
+      "ICAL_COLOR_2",
+      "ICAL_COLOR_3"
     ],
     "projectType": "native",
     "resources": {
@@ -38,7 +41,7 @@
       "watchface": false
     }
   },
-  "version": "1.3.0",
+  "version": "1.4.0",
   "scripts": {
     "test": "node tests/utf8.test.js && node tests/multi-calendar.test.js"
   }
