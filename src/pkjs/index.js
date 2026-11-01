@@ -71,58 +71,91 @@ function encodeTitleUtf8(title, bytes, startOffset) {
 
 // --- Core Functions ---
 
-/**
- * Reaches out to the Google Apps Script to get the latest calendar events.
- * @param {string} url - The user's private Google Calendar iCal URL
- */
-function fetchIcal(url) {
+// Preserve existing installations that stored just one calendar URL.
+function getCalendarUrls() {
+  var urls = [];
+  for (var i = 1; i <= 3; i++) {
+    var value = localStorage.getItem('user_ical_url_' + i);
+    if (i === 1 && value === null) value = localStorage.getItem('user_ical_url');
+    value = (value || '').trim();
+    if (value && urls.indexOf(value) === -1) urls.push(value);
+  }
+  return urls;
+}
+
+function fetchOneCalendar(url, callback) {
+  var req = new XMLHttpRequest();
+  var finished = false;
+  function finish(err, events) {
+    if (finished) return;
+    finished = true;
+    callback(err, events);
+  }
+  req.open('GET', PROXY_URL + '?url=' + encodeURIComponent(url), true);
+  req.timeout = 15000;
+  req.onreadystatechange = function() {
+    if (req.readyState !== 4 || finished) return;
+    if (req.status !== 200) return finish('HTTP ' + req.status);
+    try {
+      var data = JSON.parse(req.responseText);
+      if (!Array.isArray(data)) throw new Error('Response is not an array');
+      var valid = [];
+      for (var i = 0; i < data.length; i++) {
+        var ev = data[i];
+        if (ev && isFinite(Number(ev.timestampMs)) &&
+            Number(ev.timestampMs) > 0) {
+          valid.push(ev);
+        }
+      }
+      finish(null, valid);
+    } catch (e) {
+      finish('Invalid response: ' + e.message);
+    }
+  };
+  req.onerror = function() { finish('Network error'); };
+  req.ontimeout = function() { finish('Request timeout'); };
+  try { req.send(null); } catch (e) { finish('Request failed'); }
+}
+
+// Fetch up to three feeds sequentially to limit load on phones and the proxy.
+// Commit a new combined calendar only when ALL configured feeds succeed.
+function fetchIcal() {
   if (syncBusy) { pendingRefresh = true; return; }
+  var urls = getCalendarUrls();
+  if (!urls.length) return;
   syncBusy = true;
+  var all = [];
+  var index = 0;
   function finishSync(success) {
-    if (success === false) {
+    if (!success) {
       Pebble.sendAppMessage({SYNC_STATUS: 'error'}, function(){}, function(){});
     }
     syncBusy = false;
     if (pendingRefresh) {
       pendingRefresh = false;
-      fetchIcal(localStorage.getItem('user_ical_url'));
+      fetchIcal();
     }
   }
-  console.log('JS: Fetching fresh data from Google...');
-  
-  // Create a standard AJAX HTTP request
-  var req = new XMLHttpRequest();
-  // Open a GET request to the Proxy, attaching the user's iCal URL safely encoded
-  req.open('GET', PROXY_URL + '?url=' + encodeURIComponent(url), true);
-  
-  // Define what happens when the request finishes
-  req.onreadystatechange = function() {
-    // readyState 4 means "Done", status 200 means "Success"
-    if (req.readyState === 4 && req.status === 200) {
-      try {
-        // Convert the plain text response from Google into a Javascript Array of objects
-        var events = JSON.parse(req.responseText);
-        
-        // If Google found events in the next 7 days, start sending them to the watch
-        if (!Array.isArray(events)) throw new Error('Expected an array');
-        var watchInfo = Pebble.getActiveWatchInfo ? Pebble.getActiveWatchInfo() : null;
-        var limit = (watchInfo && watchInfo.platform === 'aplite') ? 20 : MAX_EVENTS;
-        events = events.slice(0, limit);
-        sendEventByteArray(events, 0, finishSync);
-      } catch(e) { 
-        console.log('JS: Invalid calendar JSON: ' + e.message);
-        finishSync(); 
-      }
-    } else if (req.readyState === 4) {
-      console.log('JS: Calendar request failed: HTTP ' + req.status);
-      finishSync(false);
+  function next() {
+    if (index >= urls.length) {
+      all.sort(function(a, b) { return Number(a.timestampMs) - Number(b.timestampMs); });
+      var watchInfo = Pebble.getActiveWatchInfo ? Pebble.getActiveWatchInfo() : null;
+      var limit = (watchInfo && watchInfo.platform === 'aplite') ? 20 : MAX_EVENTS;
+      sendEventByteArray(all.slice(0, limit), 0, finishSync);
+      return;
     }
-  };
-  req.timeout = 15000;
-  req.ontimeout = function() { finishSync(false); };
-  req.onerror = function() { finishSync(false); };
-  // Send the request
-  req.send(null);
+    var feedNumber = ++index;
+    fetchOneCalendar(urls[feedNumber - 1], function(err, events) {
+      if (err) {
+        console.log('JS: Calendar ' + feedNumber + ' failed: ' + err);
+        finishSync(false);
+        return;
+      }
+      for (var i = 0; i < events.length; i++) all.push(events[i]);
+      next();
+    });
+  }
+  next();
 }
 
 /**
@@ -203,16 +236,16 @@ Pebble.addEventListener('ready', function() {
   console.log('JS: PebbleKit JS Bridge Initialized.');
   
   // Retrieve saved data from the phone's local storage
-  var savedUrl = localStorage.getItem('user_ical_url');
+  var hasCalendars = getCalendarUrls().length > 0;
   var lastFetch = localStorage.getItem('last_fetch_time');
   var now = Date.now();
 
   // If the user has configured an iCal URL...
-  if (savedUrl) {
+  if (hasCalendars) {
     // Check if the cache is missing, OR if the current time minus the last fetch time is greater than 30 minutes
     if (!lastFetch || (now - parseInt(lastFetch)) > (CACHE_MINUTES * 60000)) {
       console.log('JS: Cache expired. Initiating background sync...');
-      fetchIcal(savedUrl);
+      fetchIcal();
     } else {
       console.log('JS: Data is fresh. Watch will use its own internal storage.');
     }
@@ -233,26 +266,25 @@ Pebble.addEventListener('showConfiguration', function() {
   Pebble.openURL(clay.generateUrl()); 
 });
 
-// Fired when the user taps "Save" on the Clay settings page
+// Store all three URLs locally; only send the time preference to the watch.
 Pebble.addEventListener('webviewclosed', function(e) {
-  if (e && e.response) {
-    // Convert the Clay response back into a standard dictionary
-    var dict = clay.getSettings(e.response);
-    
-    // 1. Send the dictionary to the watch immediately (This updates the 12h/24h setting)
-    Pebble.sendAppMessage(dict, function() {
-      console.log('JS: Format settings pushed to watch.');
-      
-      // 2. Extract the URL using the numerical message key ID
-      var url = dict[messageKeys.ICAL_URL];
-      
-      if (url) {
-        console.log('JS: New URL detected in settings. Forcing data sync...');
-        // Save the URL to local storage so the 'ready' event can find it next time
-        localStorage.setItem('user_ical_url', url);
-        // Force an immediate fetch from Google, bypassing the 30-minute timer
-        fetchIcal(url);
-      }
-    });
+  if (!e || !e.response || e.response === 'CANCELLED') return;
+  var dict;
+  try { dict = clay.getSettings(e.response); }
+  catch (err) { console.log('JS: Invalid settings response'); return; }
+
+  var keys = [messageKeys.ICAL_URL, messageKeys.ICAL_URL_2, messageKeys.ICAL_URL_3];
+  for (var i = 0; i < keys.length; i++) {
+    var value = dict[keys[i]];
+    if (value !== undefined && value !== null) {
+      localStorage.setItem('user_ical_url_' + (i + 1), String(value).trim());
+    }
   }
+  // Avoid sending long, private ICS URLs through AppMessage.
+  if (dict[messageKeys.TIME_FORMAT] !== undefined) {
+    Pebble.sendAppMessage({TIME_FORMAT: dict[messageKeys.TIME_FORMAT]},
+      function(){}, function(){ console.log('JS: Time format update failed'); });
+  }
+  localStorage.removeItem('last_fetch_time');
+  fetchIcal();
 });
