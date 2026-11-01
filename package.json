@@ -1,35 +1,42 @@
 {
-    "author": "ericlmccormick@gmail.com",
-    "dependencies": {
-        "pebble-clay": "^1.0.4"
+  "author": "ericlmccormick@gmail.com",
+  "dependencies": {
+    "pebble-clay": "^1.0.4"
+  },
+  "keywords": [],
+  "name": "7day-ics-calendar",
+  "pebble": {
+    "capabilities": [
+      "configurable"
+    ],
+    "displayName": "7day ICS Calendar",
+    "enableMultiJS": true,
+    "messageKeys": [
+      "TOTAL_EVENTS",
+      "CHUNK_INDEX",
+      "EVENT_DATA",
+      "TIME_FORMAT",
+      "ICAL_URL",
+      "SYNC_STATUS"
+    ],
+    "projectType": "native",
+    "resources": {
+      "media": []
     },
-    "keywords": [],
-    "name": "7day-ics-calendar",
-    "pebble": {
-        "capabilities": [
-            "configurable"
-        ],
-        "displayName": "7day ICS Calendar",
-        "enableMultiJS": true,
-        "messageKeys": [
-            "TOTAL_EVENTS",
-            "CHUNK_INDEX",
-            "EVENT_DATA",
-            "TIME_FORMAT",
-            "ICAL_URL"
-        ],
-        "projectType": "native",
-        "resources": {
-            "media": []
-        },
-        "sdkVersion": "3",
-        "targetPlatforms": [
-            "emery"
-        ],
-        "uuid": "6ad17e62-14a1-4a2a-bb79-1ab62f7bb5f1",
-        "watchapp": {
-            "watchface": false
-        }
-    },
-    "version": "1.1.0"
+    "sdkVersion": "3",
+    "targetPlatforms": [
+      "aplite",
+      "basalt",
+      "chalk",
+      "diorite",
+      "flint",
+      "emery",
+      "gabbro"
+    ],
+    "uuid": "6ad17e62-14a1-4a2a-bb79-1ab62f7bb5f1",
+    "watchapp": {
+      "watchface": false
+    }
+  },
+  "version": "1.2.0"
 }
