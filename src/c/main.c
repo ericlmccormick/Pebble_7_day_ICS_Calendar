@@ -85,6 +85,10 @@ static void update_sections() {
   s_num_sections = 0; // Reset the section count to zero
   int current_start = 0; // Track the array index where the current day group begins
   time_t now = time(NULL); // Get the current time on the watch
+  struct tm tomorrow_tm = *localtime(&now);
+  tomorrow_tm.tm_mday += 1;
+  tomorrow_tm.tm_isdst = -1;
+  time_t tomorrow = mktime(&tomorrow_tm);
   
   for (int i = 0; i < s_total_expected_events; i++) { // Loop through every event
     time_t et = (time_t)s_event_array[i].timestamp; // Get the timestamp for the current event
@@ -100,7 +104,7 @@ static void update_sections() {
         // Determine the header text: "Today", "Tomorrow", or the full date
         strftime(s_sections[s_num_sections].date_text, 32, 
                  is_same_day(now, et) ? "Today" : 
-                 is_same_day(now + 86400, et) ? "Tomorrow" : "%A, %b %d", 
+                 is_same_day(tomorrow, et) ? "Tomorrow" : "%A, %b %d", 
                  localtime(&et));
                  
         current_start = i; // Update the tracking variable to the current index
