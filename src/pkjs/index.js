@@ -20,6 +20,52 @@ var CACHE_MINUTES = 30;
 // The URL of your deployed Google Apps Script (The Proxy)
 var PROXY_URL = 'https://script.google.com/macros/s/AKfycby4NxpqCm9IYW3ijM_8UI1S95dNquYAF2wYm9sGxxveTrEcZ1yL5Gu5KUcDbMS5OoYB/exec';
 
+// Encode titles as UTF-8 without splitting a multi-byte character.
+// The C CalendarEvent struct reserves 56 bytes for its null-terminated title.
+function encodeTitleUtf8(title, bytes, startOffset) {
+  var used = 0;
+  var limit = 55;
+
+  for (var i = 0; i < title.length && used < limit; i++) {
+    var cp = title.charCodeAt(i);
+
+    // Decode UTF-16 surrogate pairs; replace malformed pairs.
+    if (cp >= 0xD800 && cp <= 0xDBFF) {
+      var next = (i + 1 < title.length) ? title.charCodeAt(i + 1) : 0;
+      if (next >= 0xDC00 && next <= 0xDFFF) {
+        cp = 0x10000 + ((cp - 0xD800) << 10) + (next - 0xDC00);
+        i++;
+      } else {
+        cp = 0xFFFD;
+      }
+    } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+      cp = 0xFFFD;
+    }
+
+    var length = cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+    if (used + length > limit) break;
+
+    if (length === 1) {
+      bytes[startOffset + used++] = cp;
+    } else if (length === 2) {
+      bytes[startOffset + used++] = 0xC0 | (cp >> 6);
+      bytes[startOffset + used++] = 0x80 | (cp & 0x3F);
+    } else if (length === 3) {
+      bytes[startOffset + used++] = 0xE0 | (cp >> 12);
+      bytes[startOffset + used++] = 0x80 | ((cp >> 6) & 0x3F);
+      bytes[startOffset + used++] = 0x80 | (cp & 0x3F);
+    } else {
+      bytes[startOffset + used++] = 0xF0 | (cp >> 18);
+      bytes[startOffset + used++] = 0x80 | ((cp >> 12) & 0x3F);
+      bytes[startOffset + used++] = 0x80 | ((cp >> 6) & 0x3F);
+      bytes[startOffset + used++] = 0x80 | (cp & 0x3F);
+    }
+  }
+
+  // ArrayBuffer is initialized to zero, so the remaining bytes and terminator
+  // are already null padded.
+}
+
 // --- Core Functions ---
 
 /**
@@ -93,11 +139,8 @@ function sendEventByteArray(events, start) {
     // Grab the title, or use a fallback if it's missing
     var t = ev.title || "No Title";
     
-    // Write the title character by character (Max 55 chars to leave room for the null terminator)
-    for (var c = 0; c < 55; c++) {
-      // If the character exists in the string, write its char code. Otherwise, write 0 (null padding).
-      bytes[offset + 8 + c] = (c < t.length) ? t.charCodeAt(c) : 0;
-    }
+    // Encode at most 55 UTF-8 bytes, leaving a null terminator.
+    encodeTitleUtf8(t, bytes, offset + 8);
   }
   
   // Convert the Uint8Array into a standard Javascript Array of numbers so Pebble can send it
