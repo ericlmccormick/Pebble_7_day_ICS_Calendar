@@ -17,6 +17,8 @@
       "EVENT_DATA",
       "TIME_FORMAT",
       "ICAL_URL",
+      "ICAL_URL_2",
+      "ICAL_URL_3",
       "SYNC_STATUS"
     ],
     "projectType": "native",
@@ -36,7 +38,7 @@
       "watchface": false
     }
   },
-  "version": "1.2.0",
+  "version": "1.3.0",
   "scripts": {
     "test": "node tests/utf8.test.js"
   }
