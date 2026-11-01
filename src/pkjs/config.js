@@ -13,12 +13,29 @@ module.exports = [
       {
         "type": "input",
         "messageKey": "ICAL_URL",
-        "label": "Google Calendar iCal URL",
+        "label": "Calendar 1 ICS URL",
         "attributes": {
           "placeholder": "https://calendar.google.com/...",
           "type": "url"
         }
-      }
+      },
+      {
+        "type": "input",
+        "messageKey": "ICAL_URL_2",
+        "label": "Calendar 2 ICS URL (optional)",
+        "attributes": {
+          "placeholder": "https://calendar.google.com/...",
+          "type": "url"
+        }
+      },
+      {
+        "type": "input",
+        "messageKey": "ICAL_URL_3",
+        "label": "Calendar 3 ICS URL (optional)",
+        "attributes": {
+          "placeholder": "https://calendar.google.com/...",
+          "type": "url"
+        }
     ]
   },
   {
