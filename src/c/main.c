@@ -7,7 +7,7 @@
 // Define how many events are sent in a single Bluetooth message to avoid hitting limits
 #define CHUNK_SIZE 2
 #define MAX_EVENTS 48
-#define STORAGE_VERSION 2
+#define STORAGE_VERSION 3
 #define PERSIST_KEY_VERSION 99
 // Define the maximum number of distinct day groups (e.g., Today, Tomorrow)
 #define MAX_SECTIONS 10
@@ -24,6 +24,7 @@ typedef struct __attribute__((__packed__)) {
   uint32_t timestamp;     // The start time of the event in Unix Epoch seconds
   uint32_t end_timestamp; // The end time of the event in Unix Epoch seconds
   char title[MAX_TITLE_LEN]; // The title of the event
+  uint8_t color; // Calendar source color (1..6)
 } CalendarEvent;
 
 // Define a structure to group events into days (Sections) for the MenuLayer
@@ -54,6 +55,23 @@ static int s_use_24h = 0;                       // Flag: 0 for 12-hour AM/PM for
 static CalendarSection s_sections[MAX_SECTIONS];// Array holding the grouping data for the Menu headers
 
 // --- Helper Functions ---
+// Muted source markers; monochrome watches use black bars.
+static GColor event_color(uint8_t color) {
+#ifdef PBL_COLOR
+  switch (color) {
+    case 2: return GColorRed;
+    case 3: return GColorGreen;
+    case 4: return GColorYellow;
+    case 5: return GColorOrange;
+    case 6: return GColorPurple;
+    default: return GColorBlue;
+  }
+#else
+  return GColorBlack;
+#endif
+}
+
+
 
 // Formats a Unix timestamp into a human-readable time string (12h or 24h)
 static void format_time(char *buffer, int buf_size, time_t timestamp) {
@@ -263,14 +281,16 @@ static void draw_row_callback(GContext* ctx, const Layer *l, MenuIndex *i, void 
   
   // Calculate which event this row corresponds to
   CalendarEvent ev = s_event_array[s_sections[i->section].start_index + i->row];
+  graphics_context_set_fill_color(ctx, event_color(ev.color));
+  graphics_fill_rect(ctx, GRect(0, 3, 4, 42), 0, GCornerNone);
   static char t_b[16]; 
   format_time(t_b, 16, ev.timestamp); // Format the start time
   
   graphics_context_set_text_color(ctx, GColorBlack); // Set text to black
   // Draw the time text in the top half of the row
-  graphics_draw_text(ctx, t_b, fonts_get_system_font(FONT_KEY_GOTHIC_18), GRect(5, 0, layer_get_bounds(l).size.w - 10, 20), 0, GTextAlignmentLeft, NULL);
+  graphics_draw_text(ctx, t_b, fonts_get_system_font(FONT_KEY_GOTHIC_18), GRect(9, 0, layer_get_bounds(l).size.w - 14, 20), 0, GTextAlignmentLeft, NULL);
   // Draw the title text in the bottom half of the row, bolded
-  graphics_draw_text(ctx, ev.title, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), GRect(5, 16, layer_get_bounds(l).size.w - 10, 30), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  graphics_draw_text(ctx, ev.title, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), GRect(9, 16, layer_get_bounds(l).size.w - 14, 30), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 }
 
 // Handles what happens when the user clicks the "Select" (middle) button on a row
