@@ -138,6 +138,7 @@ static void save_data_to_storage() {
 static void load_data_from_storage() {
   if (!persist_exists(PERSIST_KEY_VERSION) ||
       persist_read_int(PERSIST_KEY_VERSION) != STORAGE_VERSION) return;
+  if (!persist_exists(PERSIST_KEY_COUNT)) return;
   int total = persist_read_int(PERSIST_KEY_COUNT);
   if (total <= 0 || total > MAX_EVENTS) return;
   CalendarEvent *loaded = calloc(total, sizeof(CalendarEvent));
@@ -183,7 +184,7 @@ static void detail_load(Window *window) {
   layer_add_child(root, text_layer_get_layer(s_detail_title_layer)); // Add it to the window
 
   // Populate the fields with data from the selected event
-  if (s_event_array) {
+  if (s_event_array && s_selected_event_index < s_total_expected_events) {
     CalendarEvent ev = s_event_array[s_selected_event_index]; // Grab the specific event from the array
     text_layer_set_text(s_detail_title_layer, s_event_array[s_selected_event_index].title); // Point text layer to the title memory
     
@@ -206,6 +207,7 @@ static void detail_unload(Window *window) {
 
 // Opens the detail window for a specific event index
 static void show_detail(int index) {
+  if (!s_event_array || index < 0 || index >= s_total_expected_events) return;
   s_selected_event_index = index; // Save the clicked index to the global variable
   if (!s_detail_window) { // If the window doesn't exist yet, create it
     s_detail_window = window_create();
@@ -310,6 +312,7 @@ static void inbox_handler(DictionaryIterator *iter, void *ctx) {
     int total = t_t->value->int32;
     int chunk = c_t->value->int32;
     if (total < 0 || total > MAX_EVENTS || chunk < 0 ||
+        (total > 0 && chunk >= (total + CHUNK_SIZE - 1) / CHUNK_SIZE) ||
         d_t->type != TUPLE_BYTE_ARRAY) return;
     int expected_count = total - chunk * CHUNK_SIZE;
     if (expected_count > CHUNK_SIZE) expected_count = CHUNK_SIZE;
