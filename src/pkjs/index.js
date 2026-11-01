@@ -78,7 +78,10 @@ function encodeTitleUtf8(title, bytes, startOffset) {
 function fetchIcal(url) {
   if (syncBusy) { pendingRefresh = true; return; }
   syncBusy = true;
-  function finishSync() {
+  function finishSync(success) {
+    if (success === false) {
+      Pebble.sendAppMessage({SYNC_STATUS: 'error'}, function(){}, function(){});
+    }
     syncBusy = false;
     if (pendingRefresh) {
       pendingRefresh = false;
@@ -112,12 +115,12 @@ function fetchIcal(url) {
       }
     } else if (req.readyState === 4) {
       console.log('JS: Calendar request failed: HTTP ' + req.status);
-      finishSync();
+      finishSync(false);
     }
   };
   req.timeout = 15000;
-  req.ontimeout = finishSync;
-  req.onerror = finishSync;
+  req.ontimeout = function() { finishSync(false); };
+  req.onerror = function() { finishSync(false); };
   // Send the request
   req.send(null);
 }
@@ -180,7 +183,7 @@ function sendEventByteArray(events, start, done) {
       console.log('JS: All chunks sent successfully. Sync complete.');
       // ONLY NOW do we update the timestamp. This prevents partial syncs from breaking the 30-minute rule.
       localStorage.setItem('last_fetch_time', Date.now().toString());
-      done();
+      done(true);
     } else {
       // If there are more events, call this function again, shifting the starting index forward
       sendEventByteArray(events, start + CHUNK_SIZE, done);
@@ -188,7 +191,7 @@ function sendEventByteArray(events, start, done) {
   }, function(err) {
     // --- ERROR CALLBACK ---
     console.log('JS: Failed to send chunk to watch. Bluetooth might be busy.');
-    done();
+    done(false);
     // If a chunk fails, the app will try again on the next launch rather than infinitely looping.
   });
 }
