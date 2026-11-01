@@ -40,6 +40,6 @@
   },
   "version": "1.3.0",
   "scripts": {
-    "test": "node tests/utf8.test.js"
+    "test": "node tests/utf8.test.js && node tests/multi-calendar.test.js"
   }
 }
