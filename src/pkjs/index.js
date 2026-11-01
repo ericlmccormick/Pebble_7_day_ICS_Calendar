@@ -12,7 +12,10 @@ var clay = new Clay(clayConfig, null, { autoHandleEvents: false });
 
 // --- Configuration Constants ---
 // How many events we send to the watch in a single Bluetooth packet
-var CHUNK_SIZE = 4;
+var CHUNK_SIZE = 2;
+var MAX_EVENTS = 48;
+var syncBusy = false;
+var pendingRefresh = false;
 // How many bytes a single CalendarEvent struct takes up in C (8 bytes for time + 56 bytes for title = 64)
 var BYTES_PER_EVENT = 64; 
 // How many minutes the phone will wait before bothering Google for a fresh update
@@ -73,6 +76,15 @@ function encodeTitleUtf8(title, bytes, startOffset) {
  * @param {string} url - The user's private Google Calendar iCal URL
  */
 function fetchIcal(url) {
+  if (syncBusy) { pendingRefresh = true; return; }
+  syncBusy = true;
+  function finishSync() {
+    syncBusy = false;
+    if (pendingRefresh) {
+      pendingRefresh = false;
+      fetchIcal(localStorage.getItem('user_ical_url'));
+    }
+  }
   console.log('JS: Fetching fresh data from Google...');
   
   // Create a standard AJAX HTTP request
@@ -89,16 +101,23 @@ function fetchIcal(url) {
         var events = JSON.parse(req.responseText);
         
         // If Google found events in the next 7 days, start sending them to the watch
-        if (events.length > 0) {
-          sendEventByteArray(events, 0);
-        } else {
-          console.log('JS: Google returned zero events for the next 7 days.');
-        }
+        if (!Array.isArray(events)) throw new Error('Expected an array');
+        var watchInfo = Pebble.getActiveWatchInfo ? Pebble.getActiveWatchInfo() : null;
+        var limit = (watchInfo && watchInfo.platform === 'aplite') ? 20 : MAX_EVENTS;
+        events = events.slice(0, limit);
+        sendEventByteArray(events, 0, finishSync);
       } catch(e) { 
-        console.log('JS: JSON Parse Error. Google sent bad data.'); 
+        console.log('JS: Invalid calendar JSON: ' + e.message);
+        finishSync(); 
       }
+    } else if (req.readyState === 4) {
+      console.log('JS: Calendar request failed: HTTP ' + req.status);
+      finishSync();
     }
   };
+  req.timeout = 15000;
+  req.ontimeout = finishSync;
+  req.onerror = finishSync;
   // Send the request
   req.send(null);
 }
@@ -109,13 +128,13 @@ function fetchIcal(url) {
  * @param {Array} events - The full array of parsed calendar events
  * @param {number} start - The index of the array to start this specific chunk at
  */
-function sendEventByteArray(events, start) {
+function sendEventByteArray(events, start, done) {
   // Determine how many events to send in this chunk. 
   // It's usually CHUNK_SIZE (4), unless we are at the very end of the list.
   var count = Math.min(events.length - start, CHUNK_SIZE);
   
   // If we've run out of events, stop.
-  if (count <= 0) return;
+  if (count <= 0 && start !== 0) { done(); return; }
   
   // Create an empty chunk of memory exactly the right size for these events
   var buf = new ArrayBuffer(count * BYTES_PER_EVENT);
@@ -161,13 +180,15 @@ function sendEventByteArray(events, start) {
       console.log('JS: All chunks sent successfully. Sync complete.');
       // ONLY NOW do we update the timestamp. This prevents partial syncs from breaking the 30-minute rule.
       localStorage.setItem('last_fetch_time', Date.now().toString());
+      done();
     } else {
       // If there are more events, call this function again, shifting the starting index forward
-      sendEventByteArray(events, start + CHUNK_SIZE);
+      sendEventByteArray(events, start + CHUNK_SIZE, done);
     }
   }, function(err) {
     // --- ERROR CALLBACK ---
     console.log('JS: Failed to send chunk to watch. Bluetooth might be busy.');
+    done();
     // If a chunk fails, the app will try again on the next launch rather than infinitely looping.
   });
 }
