@@ -17,7 +17,7 @@ var MAX_EVENTS = 48;
 var syncBusy = false;
 var pendingRefresh = false;
 // How many bytes a single CalendarEvent struct takes up in C (8 bytes for time + 56 bytes for title = 64)
-var BYTES_PER_EVENT = 64; 
+var BYTES_PER_EVENT = 65; 
 // How many minutes the phone will wait before bothering Google for a fresh update
 var CACHE_MINUTES = 30;
 // The URL of your deployed Google Apps Script (The Proxy)
@@ -72,15 +72,19 @@ function encodeTitleUtf8(title, bytes, startOffset) {
 // --- Core Functions ---
 
 // Preserve existing installations that stored just one calendar URL.
-function getCalendarUrls() {
-  var urls = [];
+function getCalendarSources() {
+  var sources = [];
   for (var i = 1; i <= 3; i++) {
     var value = localStorage.getItem('user_ical_url_' + i);
     if (i === 1 && value === null) value = localStorage.getItem('user_ical_url');
     value = (value || '').trim();
-    if (value && urls.indexOf(value) === -1) urls.push(value);
+    var color = parseInt(localStorage.getItem('user_ical_color_' + i), 10);
+    if (color < 1 || color > 6 || !isFinite(color)) color = i;
+    if (value && !sources.some(function(source) { return source.url === value; })) {
+      sources.push({url:value, color:color});
+    }
   }
-  return urls;
+  return sources;
 }
 
 function fetchOneCalendar(url, callback) {
@@ -122,7 +126,7 @@ function fetchOneCalendar(url, callback) {
 // Commit a new combined calendar only when ALL configured feeds succeed.
 function fetchIcal() {
   if (syncBusy) { pendingRefresh = true; return; }
-  var urls = getCalendarUrls();
+  var urls = getCalendarSources();
   if (!urls.length) return;
   syncBusy = true;
   var all = [];
@@ -146,13 +150,17 @@ function fetchIcal() {
       return;
     }
     var feedNumber = ++index;
-    fetchOneCalendar(urls[feedNumber - 1], function(err, events) {
+    var source = urls[feedNumber - 1];
+    fetchOneCalendar(source.url, function(err, events) {
       if (err) {
         console.log('JS: Calendar ' + feedNumber + ' failed: ' + err);
         finishSync(false);
         return;
       }
-      for (var i = 0; i < events.length; i++) all.push(events[i]);
+      for (var i = 0; i < events.length; i++) {
+        events[i].calendarColor = source.color;
+        all.push(events[i]);
+      }
       next();
     });
   }
@@ -197,6 +205,7 @@ function sendEventByteArray(events, start, done) {
     
     // Encode at most 55 UTF-8 bytes, leaving a null terminator.
     encodeTitleUtf8(t, bytes, offset + 8);
+    bytes[offset + 64] = ev.calendarColor || 1;
   }
   
   // Convert the Uint8Array into a standard Javascript Array of numbers so Pebble can send it
@@ -237,7 +246,7 @@ Pebble.addEventListener('ready', function() {
   console.log('JS: PebbleKit JS Bridge Initialized.');
   
   // Retrieve saved data from the phone's local storage
-  var hasCalendars = getCalendarUrls().length > 0;
+  var hasCalendars = getCalendarSources().length > 0;
   var lastFetch = localStorage.getItem('last_fetch_time');
   var now = Date.now();
 
@@ -257,7 +266,7 @@ Pebble.addEventListener('ready', function() {
 // This happens if the watch's internal storage gets wiped and it needs data IMMEDIATELY
 Pebble.addEventListener('appmessage', function(e) {
   console.log('JS: Watch requested an emergency data sync!');
-  if (getCalendarUrls().length) fetchIcal(); // Force all configured calendars
+  if (getCalendarSources().length) fetchIcal(); // Force all configured calendars
 });
 
 // Fired when the user taps the "Settings" gear icon in the Pebble app on their phone
@@ -278,6 +287,12 @@ Pebble.addEventListener('webviewclosed', function(e) {
     var value = dict[keys[i]];
     if (value !== undefined && value !== null) {
       localStorage.setItem('user_ical_url_' + (i + 1), String(value).trim());
+    }
+  }
+  for (var c = 1; c <= 3; c++) {
+    var selectedColor = parseInt(dict[messageKeys['ICAL_COLOR_' + c]], 10);
+    if (selectedColor >= 1 && selectedColor <= 6) {
+      localStorage.setItem('user_ical_color_' + c, String(selectedColor));
     }
   }
   // Avoid sending long, private ICS URLs through AppMessage.
