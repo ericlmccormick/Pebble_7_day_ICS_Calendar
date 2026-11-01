@@ -20,6 +20,29 @@ def options(ctx):
 
 
 def configure(ctx):
+    # The published Clay 1.0.4 package predates Flint/Gabbro.
+    # Pebble package validation reads the copied dist manifest, not
+    # necessarily the npm root package.json.
+    import json
+    for relative in [
+        'node_modules/pebble-clay/package.json',
+        'node_modules/pebble-clay/dist/include/pebble-clay/package.json'
+    ]:
+        manifest = ctx.path.find_node(relative)
+        if not manifest:
+            continue
+        filename = manifest.abspath()
+        with open(filename, 'r') as stream:
+            metadata = json.load(stream)
+        pebble = metadata.get('pebble', {})
+        platforms = pebble.get('targetPlatforms')
+        if isinstance(platforms, list):
+            for platform in ('flint', 'gabbro'):
+                if platform not in platforms:
+                    platforms.append(platform)
+            with open(filename, 'w') as stream:
+                json.dump(metadata, stream, indent=2)
+            ctx.msg('Patched Clay platform metadata', relative)
     ctx.load('pebble_sdk')
 
 
