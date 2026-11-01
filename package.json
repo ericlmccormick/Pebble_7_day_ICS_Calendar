@@ -38,5 +38,9 @@
       "watchface": false
     }
   },
-  "version": "1.2.0"
+  "version": "1.2.0",
+  "scripts": {
+    "postinstall": "node scripts/patch-clay-platforms.js",
+    "test": "node tests/utf8.test.js"
+  }
 }
