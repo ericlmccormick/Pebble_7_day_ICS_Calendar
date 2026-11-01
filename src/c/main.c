@@ -294,6 +294,14 @@ static void select_long_click_callback(MenuLayer *m, MenuIndex *i, void *d) {
 // Handles all incoming messages from the phone (JavaScript)
 static void inbox_handler(DictionaryIterator *iter, void *ctx) {
   
+  Tuple *status = dict_find(iter, MESSAGE_KEY_SYNC_STATUS);
+  if (status && status->type == TUPLE_CSTRING && strcmp(status->value->cstring, "error") == 0) {
+    s_sync_in_progress = false;
+    text_layer_set_text(s_toast_layer, "Sync failed");
+    layer_set_hidden(text_layer_get_layer(s_toast_layer), false);
+    menu_layer_reload_data(s_menu_layer);
+    return;
+  }
   // 1. Check if the message contains a 12h/24h time format setting update
   Tuple *f_t = dict_find(iter, MESSAGE_KEY_TIME_FORMAT);
   if (f_t) { 
@@ -339,6 +347,7 @@ static void inbox_handler(DictionaryIterator *iter, void *ctx) {
       s_events_received_so_far = 0;
       s_next_chunk = 0;
       s_sync_in_progress = (s_new_data_buffer != NULL);
+      text_layer_set_text(s_toast_layer, "Syncing data...");
       layer_set_hidden(text_layer_get_layer(s_toast_layer), !s_sync_in_progress);
     }
     if (!s_sync_in_progress || chunk != s_next_chunk) return;
