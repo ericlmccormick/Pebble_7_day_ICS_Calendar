@@ -29,9 +29,7 @@
       "basalt",
       "chalk",
       "diorite",
-      "flint",
-      "emery",
-      "gabbro"
+      "emery"
     ],
     "uuid": "6ad17e62-14a1-4a2a-bb79-1ab62f7bb5f1",
     "watchapp": {
@@ -40,7 +38,6 @@
   },
   "version": "1.2.0",
   "scripts": {
-    "postinstall": "node scripts/patch-clay-platforms.js",
     "test": "node tests/utf8.test.js"
   }
 }
