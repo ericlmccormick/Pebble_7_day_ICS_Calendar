@@ -103,7 +103,8 @@ function fetchOneCalendar(url, callback) {
       for (var i = 0; i < data.length; i++) {
         var ev = data[i];
         if (ev && isFinite(Number(ev.timestampMs)) &&
-            Number(ev.timestampMs) > 0) {
+            Number(ev.timestampMs) > 0 &&
+            (ev.endTimestampMs === undefined || isFinite(Number(ev.endTimestampMs)))) {
           valid.push(ev);
         }
       }
@@ -170,7 +171,7 @@ function sendEventByteArray(events, start, done) {
   var count = Math.min(events.length - start, CHUNK_SIZE);
   
   // If we've run out of events, stop.
-  if (count <= 0 && start !== 0) { done(); return; }
+  if (count <= 0 && start !== 0) { done(true); return; }
   
   // Create an empty chunk of memory exactly the right size for these events
   var buf = new ArrayBuffer(count * BYTES_PER_EVENT);
@@ -256,8 +257,7 @@ Pebble.addEventListener('ready', function() {
 // This happens if the watch's internal storage gets wiped and it needs data IMMEDIATELY
 Pebble.addEventListener('appmessage', function(e) {
   console.log('JS: Watch requested an emergency data sync!');
-  var savedUrl = localStorage.getItem('user_ical_url');
-  if (savedUrl) fetchIcal(savedUrl); // Bypass the 30-minute timer and fetch
+  if (getCalendarUrls().length) fetchIcal(); // Force all configured calendars
 });
 
 // Fired when the user taps the "Settings" gear icon in the Pebble app on their phone
