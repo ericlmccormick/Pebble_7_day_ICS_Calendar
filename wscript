@@ -22,7 +22,6 @@ def options(ctx):
 def configure(ctx):
     ctx.load('pebble_sdk')
 
-
 def build(ctx):
     if False and hint is not None:
         try:

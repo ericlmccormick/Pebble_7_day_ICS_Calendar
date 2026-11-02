@@ -5,7 +5,10 @@
 // Define the maximum length for a calendar event title string (55 characters + 1 null terminator)
 #define MAX_TITLE_LEN 56 
 // Define how many events are sent in a single Bluetooth message to avoid hitting limits
-#define CHUNK_SIZE 4
+#define CHUNK_SIZE 2
+#define MAX_EVENTS 48
+#define STORAGE_VERSION 3
+#define PERSIST_KEY_VERSION 99
 // Define the maximum number of distinct day groups (e.g., Today, Tomorrow)
 #define MAX_SECTIONS 10
 // Define the storage key used to save the total number of events
@@ -21,6 +24,7 @@ typedef struct __attribute__((__packed__)) {
   uint32_t timestamp;     // The start time of the event in Unix Epoch seconds
   uint32_t end_timestamp; // The end time of the event in Unix Epoch seconds
   char title[MAX_TITLE_LEN]; // The title of the event
+  uint8_t color; // Calendar source color (1..6)
 } CalendarEvent;
 
 // Define a structure to group events into days (Sections) for the MenuLayer
@@ -42,13 +46,32 @@ static TextLayer *s_toast_layer;        // The notification layer for the "Synci
 static CalendarEvent *s_event_array = NULL;     // Pointer to the memory holding the currently displayed events
 static CalendarEvent *s_new_data_buffer = NULL; // Pointer to the memory holding incoming data during a sync
 static int s_total_expected_events = 0;         // The total number of events the phone says it will send
-static int s_events_received_so_far = 0;        // Counter tracking how many events have successfully arrived
+static int s_events_received_so_far = 0;
+static int s_next_chunk = 0;
+static bool s_sync_in_progress = false;        // Counter tracking how many events have successfully arrived
 static int s_num_sections = 0;                  // How many unique day headers we currently have
 static int s_selected_event_index = 0;          // The index of the event the user clicked on
 static int s_use_24h = 0;                       // Flag: 0 for 12-hour AM/PM format, 1 for 24-hour format
 static CalendarSection s_sections[MAX_SECTIONS];// Array holding the grouping data for the Menu headers
 
 // --- Helper Functions ---
+// Muted source markers; monochrome watches use black bars.
+static GColor event_color(uint8_t color) {
+#ifdef PBL_COLOR
+  switch (color) {
+    case 2: return GColorRed;
+    case 3: return GColorGreen;
+    case 4: return GColorYellow;
+    case 5: return GColorOrange;
+    case 6: return GColorPurple;
+    default: return GColorBlue;
+  }
+#else
+  return GColorBlack;
+#endif
+}
+
+
 
 // Formats a Unix timestamp into a human-readable time string (12h or 24h)
 static void format_time(char *buffer, int buf_size, time_t timestamp) {
@@ -75,11 +98,15 @@ static bool is_same_day(time_t t1, time_t t2) {
 
 // Organizes the linear list of events into groups based on their calendar day
 static void update_sections() {
-  if (s_total_expected_events == 0 || !s_event_array) return; // If there is no data, exit the function
+  if (s_total_expected_events == 0 || !s_event_array) { s_num_sections = 0; return; } // If there is no data, exit the function
   
   s_num_sections = 0; // Reset the section count to zero
   int current_start = 0; // Track the array index where the current day group begins
   time_t now = time(NULL); // Get the current time on the watch
+  struct tm tomorrow_tm = *localtime(&now);
+  tomorrow_tm.tm_mday += 1;
+  tomorrow_tm.tm_isdst = -1;
+  time_t tomorrow = mktime(&tomorrow_tm);
   
   for (int i = 0; i < s_total_expected_events; i++) { // Loop through every event
     time_t et = (time_t)s_event_array[i].timestamp; // Get the timestamp for the current event
@@ -95,7 +122,7 @@ static void update_sections() {
         // Determine the header text: "Today", "Tomorrow", or the full date
         strftime(s_sections[s_num_sections].date_text, 32, 
                  is_same_day(now, et) ? "Today" : 
-                 is_same_day(now + 86400, et) ? "Tomorrow" : "%A, %b %d", 
+                 is_same_day(tomorrow, et) ? "Tomorrow" : "%A, %b %d", 
                  localtime(&et));
                  
         current_start = i; // Update the tracking variable to the current index
@@ -113,6 +140,7 @@ static void update_sections() {
 
 // Saves the event array into the watch's permanent memory in small chunks
 static void save_data_to_storage() {
+  persist_write_int(PERSIST_KEY_VERSION, STORAGE_VERSION);
   persist_write_int(PERSIST_KEY_COUNT, s_total_expected_events); // Save the total number of events
   
   // Loop through the array, jumping forward by CHUNK_SIZE (4) each time
@@ -121,26 +149,39 @@ static void save_data_to_storage() {
     int to_save = (remaining < CHUNK_SIZE) ? remaining : CHUNK_SIZE; // Determine if we save a full chunk of 4, or a partial chunk
     
     // Save the chunk to a unique key (102, 103, 104, etc.) to bypass the 256-byte limit
-    persist_write_data(PERSIST_BASE_DATA_KEY + (i / CHUNK_SIZE), &s_event_array[i], to_save * sizeof(CalendarEvent));
+    if (persist_write_data(PERSIST_BASE_DATA_KEY + (i / CHUNK_SIZE), &s_event_array[i], to_save * sizeof(CalendarEvent)) != (int)(to_save * sizeof(CalendarEvent))) {
+      persist_delete(PERSIST_KEY_VERSION);
+      return;
+    }
   }
 }
 
 // Loads the event array from the watch's permanent memory
 static void load_data_from_storage() {
-  s_total_expected_events = persist_read_int(PERSIST_KEY_COUNT); // Read the saved total count
-  
-  if (s_total_expected_events > 0) { // If there are events saved
-    if (s_event_array) free(s_event_array); // Free any existing memory just in case
-    s_event_array = malloc(s_total_expected_events * sizeof(CalendarEvent)); // Allocate fresh memory for the saved events
-    
-    // Loop through and read the chunks back from their respective keys
-    for (int i = 0; i < s_total_expected_events; i += CHUNK_SIZE) {
-      int remaining = s_total_expected_events - i; // Calculate how many are left to read
-      int to_read = (remaining < CHUNK_SIZE) ? remaining : CHUNK_SIZE; // Determine chunk size to read
-      persist_read_data(PERSIST_BASE_DATA_KEY + (i / CHUNK_SIZE), &s_event_array[i], to_read * sizeof(CalendarEvent)); // Read data into the array
+  if (!persist_exists(PERSIST_KEY_VERSION) ||
+      persist_read_int(PERSIST_KEY_VERSION) != STORAGE_VERSION) return;
+  if (!persist_exists(PERSIST_KEY_COUNT)) return;
+  int total = persist_read_int(PERSIST_KEY_COUNT);
+  if (total <= 0 || total > MAX_EVENTS) return;
+  CalendarEvent *loaded = calloc(total, sizeof(CalendarEvent));
+  if (!loaded) return;
+  for (int i = 0; i < total; i += CHUNK_SIZE) {
+    int count = (total - i < CHUNK_SIZE) ? total - i : CHUNK_SIZE;
+    int expected = count * sizeof(CalendarEvent);
+    if (persist_read_data(PERSIST_BASE_DATA_KEY + (i / CHUNK_SIZE), &loaded[i], expected) != expected) {
+      free(loaded);
+      return;
     }
-    update_sections(); // Group the newly loaded data into headers
+    for (int j = i; j < i + count; j++) {
+      if (!memchr(loaded[j].title, 0, MAX_TITLE_LEN)) {
+        free(loaded);
+        return;
+      }
+    }
   }
+  s_event_array = loaded;
+  s_total_expected_events = total;
+  update_sections();
 }
 
 // --- Detail Window Functions ---
@@ -165,7 +206,7 @@ static void detail_load(Window *window) {
   layer_add_child(root, text_layer_get_layer(s_detail_title_layer)); // Add it to the window
 
   // Populate the fields with data from the selected event
-  if (s_event_array) {
+  if (s_event_array && s_selected_event_index < s_total_expected_events) {
     CalendarEvent ev = s_event_array[s_selected_event_index]; // Grab the specific event from the array
     text_layer_set_text(s_detail_title_layer, s_event_array[s_selected_event_index].title); // Point text layer to the title memory
     
@@ -188,6 +229,7 @@ static void detail_unload(Window *window) {
 
 // Opens the detail window for a specific event index
 static void show_detail(int index) {
+  if (!s_event_array || index < 0 || index >= s_total_expected_events) return;
   s_selected_event_index = index; // Save the clicked index to the global variable
   if (!s_detail_window) { // If the window doesn't exist yet, create it
     s_detail_window = window_create();
@@ -223,30 +265,32 @@ static int16_t get_cell_h_callback(MenuLayer *m, MenuIndex *i, void *d) {
 
 // Draws the visual design of the headers (Today, Tomorrow, etc.)
 static void draw_head_callback(GContext* ctx, const Layer *l, uint16_t s, void *d) {
-  graphics_context_set_fill_color(ctx, GColorDukeBlue); // Set background color to dark blue
+  graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(GColorDukeBlue, GColorBlack)); // Set background color to dark blue
   graphics_fill_rect(ctx, layer_get_bounds(l), 0, GCornerNone); // Draw a rectangle filling the header bounds
   graphics_context_set_text_color(ctx, GColorWhite); // Set text color to white
   // Draw the date text using a bold 14pt font
-  graphics_draw_text(ctx, s_sections[s].date_text, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD), GRect(5, 2, 200, 20), 0, GTextAlignmentLeft, NULL);
+  graphics_draw_text(ctx, s_sections[s].date_text, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD), GRect(5, 2, layer_get_bounds(l).size.w - 10, 20), 0, GTextAlignmentLeft, NULL);
 }
 
 // Draws the visual design of the individual event rows
 static void draw_row_callback(GContext* ctx, const Layer *l, MenuIndex *i, void *d) {
   if (s_num_sections == 0) { // If there is no data...
-    menu_cell_basic_draw(ctx, l, "Loading...", NULL, NULL); // ...draw a basic "Loading..." cell
+    menu_cell_basic_draw(ctx, l, s_sync_in_progress ? "Loading..." : "No upcoming events", NULL, NULL); // ...draw a basic "Loading..." cell
     return; // Stop drawing
   }
   
   // Calculate which event this row corresponds to
   CalendarEvent ev = s_event_array[s_sections[i->section].start_index + i->row];
+  graphics_context_set_fill_color(ctx, event_color(ev.color));
+  graphics_fill_rect(ctx, GRect(0, 3, 4, 42), 0, GCornerNone);
   static char t_b[16]; 
   format_time(t_b, 16, ev.timestamp); // Format the start time
   
   graphics_context_set_text_color(ctx, GColorBlack); // Set text to black
   // Draw the time text in the top half of the row
-  graphics_draw_text(ctx, t_b, fonts_get_system_font(FONT_KEY_GOTHIC_18), GRect(5, 0, 190, 20), 0, GTextAlignmentLeft, NULL);
+  graphics_draw_text(ctx, t_b, fonts_get_system_font(FONT_KEY_GOTHIC_18), GRect(9, 0, layer_get_bounds(l).size.w - 14, 20), 0, GTextAlignmentLeft, NULL);
   // Draw the title text in the bottom half of the row, bolded
-  graphics_draw_text(ctx, ev.title, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), GRect(5, 16, 190, 30), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  graphics_draw_text(ctx, ev.title, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), GRect(9, 16, layer_get_bounds(l).size.w - 14, 30), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 }
 
 // Handles what happens when the user clicks the "Select" (middle) button on a row
@@ -274,6 +318,14 @@ static void select_long_click_callback(MenuLayer *m, MenuIndex *i, void *d) {
 // Handles all incoming messages from the phone (JavaScript)
 static void inbox_handler(DictionaryIterator *iter, void *ctx) {
   
+  Tuple *status = dict_find(iter, MESSAGE_KEY_SYNC_STATUS);
+  if (status && status->type == TUPLE_CSTRING && strcmp(status->value->cstring, "error") == 0) {
+    s_sync_in_progress = false;
+    text_layer_set_text(s_toast_layer, "Sync failed");
+    layer_set_hidden(text_layer_get_layer(s_toast_layer), false);
+    menu_layer_reload_data(s_menu_layer);
+    return;
+  }
   // 1. Check if the message contains a 12h/24h time format setting update
   Tuple *f_t = dict_find(iter, MESSAGE_KEY_TIME_FORMAT);
   if (f_t) { 
@@ -287,38 +339,60 @@ static void inbox_handler(DictionaryIterator *iter, void *ctx) {
   Tuple *c_t = dict_find(iter, MESSAGE_KEY_CHUNK_INDEX);  // Which chunk this is
   Tuple *d_t = dict_find(iter, MESSAGE_KEY_EVENT_DATA);   // The actual byte array of data
 
-  // If all three calendar keys exist in the message...
+  // Strictly validate incoming chunks before writing into watch memory.
   if (t_t && c_t && d_t) {
-    int total = t_t->value->int32; // Extract total count
-    int chunk = c_t->value->int32; // Extract chunk index
-
-    // If this is Chunk 0, a new sync is starting
-    if (chunk == 0) {
-      layer_set_hidden(text_layer_get_layer(s_toast_layer), false); // UNHIDE the "Syncing..." notification
-      if (s_new_data_buffer) { free(s_new_data_buffer); s_new_data_buffer = NULL; } // Clear old buffer if it exists
-      s_new_data_buffer = malloc(total * sizeof(CalendarEvent)); // Allocate fresh memory for incoming sync
-      s_events_received_so_far = 0; // Reset receive counter
+    int total = t_t->value->int32;
+    int chunk = c_t->value->int32;
+    if (total < 0 || total > MAX_EVENTS || chunk < 0 ||
+        (total > 0 && chunk >= (total + CHUNK_SIZE - 1) / CHUNK_SIZE) ||
+        d_t->type != TUPLE_BYTE_ARRAY) return;
+    int expected_count = total - chunk * CHUNK_SIZE;
+    if (expected_count > CHUNK_SIZE) expected_count = CHUNK_SIZE;
+    if (total == 0) {
+      if (chunk != 0 || d_t->length != 0) return;
+      if (s_new_data_buffer) free(s_new_data_buffer);
+      s_new_data_buffer = NULL;
+      if (s_event_array) free(s_event_array);
+      s_event_array = NULL;
+      s_total_expected_events = 0;
+      s_num_sections = 0;
+      s_sync_in_progress = false;
+      persist_write_int(PERSIST_KEY_VERSION, STORAGE_VERSION);
+      persist_write_int(PERSIST_KEY_COUNT, 0);
+      menu_layer_reload_data(s_menu_layer);
+      layer_set_hidden(text_layer_get_layer(s_toast_layer), true);
+      return;
     }
-
-    // Process the incoming data chunk
-    if (s_new_data_buffer) {
-      // Copy the incoming byte array directly into the correct spot in our data buffer memory
-      memcpy(&s_new_data_buffer[chunk * CHUNK_SIZE], d_t->value->data, d_t->length);
-      s_events_received_so_far += (d_t->length / sizeof(CalendarEvent)); // Update counter
-      
-      // If we have received ALL expected events, the sync is complete
-      if (s_events_received_so_far >= total) {
-        if (s_event_array) { free(s_event_array); s_event_array = NULL; } // Free the old active data
-        s_event_array = s_new_data_buffer; // Swap the new buffer into the active array
-        s_new_data_buffer = NULL; // Clear the buffer pointer
-        s_total_expected_events = total; // Update global total
-        
-        update_sections(); // Group the new data into headers
-        menu_layer_reload_data(s_menu_layer); // Tell the MenuLayer to redraw the screen
-        save_data_to_storage(); // Save the new data to permanent storage
-        
-        layer_set_hidden(text_layer_get_layer(s_toast_layer), true); // HIDE the "Syncing..." notification
-      }
+    if (expected_count <= 0 ||
+        d_t->length != expected_count * sizeof(CalendarEvent)) return;
+    if (chunk == 0) {
+      if (s_new_data_buffer) free(s_new_data_buffer);
+      s_new_data_buffer = calloc(total, sizeof(CalendarEvent));
+      s_events_received_so_far = 0;
+      s_next_chunk = 0;
+      s_sync_in_progress = (s_new_data_buffer != NULL);
+      text_layer_set_text(s_toast_layer, "Syncing data...");
+      layer_set_hidden(text_layer_get_layer(s_toast_layer), !s_sync_in_progress);
+    }
+    if (!s_sync_in_progress || chunk != s_next_chunk) return;
+    const CalendarEvent *incoming = (const CalendarEvent *)d_t->value->data;
+    for (int i = 0; i < expected_count; i++) {
+      if (!memchr(incoming[i].title, 0, MAX_TITLE_LEN)) return;
+    }
+    memcpy(&s_new_data_buffer[chunk * CHUNK_SIZE],
+           d_t->value->data, d_t->length);
+    s_events_received_so_far += expected_count;
+    s_next_chunk++;
+    if (s_events_received_so_far == total) {
+      if (s_event_array) free(s_event_array);
+      s_event_array = s_new_data_buffer;
+      s_new_data_buffer = NULL;
+      s_total_expected_events = total;
+      s_sync_in_progress = false;
+      update_sections();
+      menu_layer_reload_data(s_menu_layer);
+      save_data_to_storage();
+      layer_set_hidden(text_layer_get_layer(s_toast_layer), true);
     }
   }
 }
@@ -333,7 +407,7 @@ static void main_load(Window *window) {
   // Create and configure the MenuLayer (The scrolling list)
   s_menu_layer = menu_layer_create(bounds);
   menu_layer_set_normal_colors(s_menu_layer, GColorWhite, GColorBlack); // White background, Black text
-  menu_layer_set_highlight_colors(s_menu_layer, GColorCyan, GColorBlack); // Cyan highlight, Black text
+  menu_layer_set_highlight_colors(s_menu_layer, PBL_IF_COLOR_ELSE(GColorCyan, GColorBlack), PBL_IF_COLOR_ELSE(GColorBlack, GColorWhite)); // Cyan highlight, Black text
 
   // Register all the drawing/logic callbacks for the MenuLayer
   menu_layer_set_callbacks(s_menu_layer, NULL, (MenuLayerCallbacks){
@@ -392,10 +466,11 @@ static void init() {
   // Register the function to listen for Bluetooth messages
   app_message_register_inbox_received(inbox_handler);
   // Open the Bluetooth channels (Input buffer: 2048 bytes, Output buffer: 512 bytes)
-  app_message_open(2048, 512);
+  app_message_open(512, 128);
 
   // If the watch has absolutely zero data on launch, force a fetch immediately
   if (s_total_expected_events == 0) {
+    s_sync_in_progress = true;
     layer_set_hidden(text_layer_get_layer(s_toast_layer), false); // Show the "Syncing" toast immediately
     DictionaryIterator *out;
     app_message_outbox_begin(&out); // Start an outgoing message
