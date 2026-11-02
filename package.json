@@ -23,7 +23,9 @@
       "ICAL_COLOR_1",
       "ICAL_COLOR_2",
       "ICAL_COLOR_3",
-      "FONT_SIZE"
+      "FONT_SIZE",
+      "DETAIL_REQUEST",
+      "DETAIL_TEXT"
     ],
     "projectType": "native",
     "resources": {
@@ -42,7 +44,7 @@
       "watchface": false
     }
   },
-  "version": "1.6.1",
+  "version": "1.7.0",
   "scripts": {
     "test": "node tests/utf8.test.js && node tests/multi-calendar.test.js"
   }
