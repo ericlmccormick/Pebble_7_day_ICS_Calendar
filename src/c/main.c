@@ -42,7 +42,9 @@ static Window *s_detail_window = NULL;  // The window that pops up to show event
 static MenuLayer *s_menu_layer;         // The scrolling list layer for the main window
 static ScrollLayer *s_detail_scroll_layer;
 static TextLayer *s_detail_title_layer; // The text layer showing the event title in the detail window
-static TextLayer *s_detail_time_layer;  // The text layer showing the event time in the detail window
+static TextLayer *s_detail_time_layer;
+static TextLayer *s_detail_meta_layer;
+static char s_detail_meta[360] = "Loading details...";  // The text layer showing the event time in the detail window
 static TextLayer *s_toast_layer;        // The notification layer for the "Syncing..." status
 
 // --- Global Data Variables ---
@@ -280,6 +282,13 @@ static void detail_load(Window *window) {
   text_layer_set_background_color(s_detail_title_layer, GColorClear);
   text_layer_set_overflow_mode(s_detail_title_layer, GTextOverflowModeWordWrap);
   scroll_layer_add_child(s_detail_scroll_layer, text_layer_get_layer(s_detail_title_layer));
+  s_detail_meta_layer = text_layer_create(GRect(margin, 183, width, 150));
+  text_layer_set_font(s_detail_meta_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+  text_layer_set_text_color(s_detail_meta_layer, GColorBlack);
+  text_layer_set_background_color(s_detail_meta_layer, GColorClear);
+  text_layer_set_overflow_mode(s_detail_meta_layer, GTextOverflowModeWordWrap);
+  text_layer_set_text(s_detail_meta_layer, s_detail_meta);
+  scroll_layer_add_child(s_detail_scroll_layer, text_layer_get_layer(s_detail_meta_layer));
   if (s_event_array && s_selected_event_index < s_total_expected_events) {
     CalendarEvent *ev = &s_event_array[s_selected_event_index];
     text_layer_set_text(s_detail_title_layer, ev->title);
@@ -292,7 +301,10 @@ static void detail_load(Window *window) {
     text_layer_set_text(s_detail_time_layer, when);
   }
   GSize title_size = text_layer_get_content_size(s_detail_title_layer);
-  int content_height = 69 + title_size.h + 20;
+  int meta_y = 69 + title_size.h + 8;
+  GSize meta_size = text_layer_get_content_size(s_detail_meta_layer);
+  layer_set_frame(text_layer_get_layer(s_detail_meta_layer), GRect(margin, meta_y, width, meta_size.h + 16));
+  int content_height = meta_y + meta_size.h + 20;
   if (content_height < bounds.size.h) content_height = bounds.size.h;
   layer_set_frame(text_layer_get_layer(s_detail_title_layer),
       GRect(margin, 69, width, content_height - 69));
@@ -301,12 +313,15 @@ static void detail_load(Window *window) {
 static void detail_unload(Window *window) {
   text_layer_destroy(s_detail_title_layer);
   text_layer_destroy(s_detail_time_layer);
+  text_layer_destroy(s_detail_meta_layer);
+  s_detail_meta_layer = NULL;
   scroll_layer_destroy(s_detail_scroll_layer);
 }
 
 // Opens the detail window for a specific event index
 static void show_detail(int index) {
   if (!s_event_array || index < 0 || index >= s_total_expected_events) return;
+  snprintf(s_detail_meta, sizeof(s_detail_meta), "Loading details...");
   s_selected_event_index = index; // Save the clicked index to the global variable
   if (!s_detail_window) { // If the window doesn't exist yet, create it
     s_detail_window = window_create();
@@ -316,6 +331,11 @@ static void show_detail(int index) {
     });
   }
   window_stack_push(s_detail_window, true); // Push the window onto the screen with an animation
+  DictionaryIterator *request;
+  if (app_message_outbox_begin(&request) == APP_MSG_OK) {
+    dict_write_int32(request, MESSAGE_KEY_DETAIL_REQUEST, index);
+    app_message_outbox_send();
+  }
 }
 
 // --- MenuLayer Callbacks ---
@@ -399,6 +419,19 @@ static void select_long_click_callback(MenuLayer *m, MenuIndex *i, void *d) {
 // Handles all incoming messages from the phone (JavaScript)
 static void inbox_handler(DictionaryIterator *iter, void *ctx) {
   
+  Tuple *detail = dict_find(iter, MESSAGE_KEY_DETAIL_TEXT);
+  if (detail && detail->type == TUPLE_CSTRING) {
+    snprintf(s_detail_meta, sizeof(s_detail_meta), "%s", detail->value->cstring);
+    if (s_detail_meta_layer) {
+      text_layer_set_text(s_detail_meta_layer, s_detail_meta);
+      GRect frame = layer_get_frame(text_layer_get_layer(s_detail_meta_layer));
+      GSize size = text_layer_get_content_size(s_detail_meta_layer);
+      frame.size.h = size.h + 16;
+      layer_set_frame(text_layer_get_layer(s_detail_meta_layer), frame);
+      scroll_layer_set_content_size(s_detail_scroll_layer, GSize(scroll_layer_get_content_size(s_detail_scroll_layer).w, frame.origin.y + frame.size.h + 15));
+    }
+    return;
+  }
   Tuple *status = dict_find(iter, MESSAGE_KEY_SYNC_STATUS);
   if (status && status->type == TUPLE_CSTRING && strcmp(status->value->cstring, "error") == 0) {
     s_sync_in_progress = false;
