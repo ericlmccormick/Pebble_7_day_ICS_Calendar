@@ -100,6 +100,9 @@ function fetchOneCalendar(url, callback) {
   req.timeout = 15000;
   req.onreadystatechange = function() {
     if (req.readyState !== 4 || finished) return;
+    if (req.status === 0) {
+      return finish('No HTTP response (network, redirect, authentication, or CORS)');
+    }
     if (req.status !== 200) return finish('HTTP ' + req.status);
     try {
       var data = JSON.parse(req.responseText);
@@ -118,7 +121,7 @@ function fetchOneCalendar(url, callback) {
       finish('Invalid response: ' + e.message);
     }
   };
-  req.onerror = function() { finish('Network error'); };
+  req.onerror = function() { finish('Network error / response blocked'); };
   req.ontimeout = function() { finish('Request timeout'); };
   try { req.send(null); } catch (e) { finish('Request failed'); }
 }
