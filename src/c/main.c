@@ -260,55 +260,65 @@ static void load_data_from_storage() {
 // --- Detail Window Functions ---
 
 // Sets up the UI elements when the Detail Window is opened
+// Measure text with its final width, then stack the layers without overlap.
+static void layout_detail_content(void) {
+  if (!s_detail_scroll_layer || !s_detail_time_layer ||
+      !s_detail_title_layer || !s_detail_meta_layer) return;
+  GRect bounds = layer_get_bounds(window_get_root_layer(s_detail_window));
+  int margin = PBL_IF_ROUND_ELSE(22, 10);
+  int width = bounds.size.w - 2 * margin;
+  int y = PBL_IF_ROUND_ELSE(22, 8);
+  TextLayer *layers[] = {s_detail_time_layer, s_detail_title_layer, s_detail_meta_layer};
+  for (int i = 0; i < 3; i++) {
+    // This generous temporary height prevents measurement from clipping lines.
+    layer_set_frame(text_layer_get_layer(layers[i]), GRect(margin, y, width, 1200));
+    GSize size = text_layer_get_content_size(layers[i]);
+    int height = size.h + 4;
+    layer_set_frame(text_layer_get_layer(layers[i]), GRect(margin, y, width, height));
+    y += height + (i == 0 ? 12 : 10);
+  }
+  y += PBL_IF_ROUND_ELSE(22, 12);
+  if (y < bounds.size.h) y = bounds.size.h;
+  scroll_layer_set_content_size(s_detail_scroll_layer, GSize(bounds.size.w, y));
+}
 static void detail_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   GRect bounds = layer_get_bounds(root);
   window_set_background_color(window, GColorWhite);
-  int margin = PBL_IF_ROUND_ELSE(22, 10);
-  int width = bounds.size.w - 2 * margin;
-  int text_size = effective_font_mode();
   s_detail_scroll_layer = scroll_layer_create(bounds);
   scroll_layer_set_click_config_onto_window(s_detail_scroll_layer, window);
   layer_add_child(root, scroll_layer_get_layer(s_detail_scroll_layer));
-  s_detail_time_layer = text_layer_create(GRect(margin, 8, width, 58));
-  text_layer_set_font(s_detail_time_layer, fonts_get_system_font(text_size == 1 ? FONT_KEY_GOTHIC_14_BOLD : FONT_KEY_GOTHIC_18_BOLD));
+  const int font = effective_font_mode();
+  s_detail_time_layer = text_layer_create(GRect(0, 0, bounds.size.w, 48));
+  text_layer_set_font(s_detail_time_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
   text_layer_set_text_color(s_detail_time_layer, GColorBlack);
   text_layer_set_background_color(s_detail_time_layer, GColorClear);
   scroll_layer_add_child(s_detail_scroll_layer, text_layer_get_layer(s_detail_time_layer));
-  s_detail_title_layer = text_layer_create(GRect(margin, 69, width, 110));
+  s_detail_title_layer = text_layer_create(GRect(0, 0, bounds.size.w, 48));
   text_layer_set_font(s_detail_title_layer, fonts_get_system_font(
-      text_size == 1 ? FONT_KEY_GOTHIC_18_BOLD : (text_size == 3 ? FONT_KEY_GOTHIC_28_BOLD : FONT_KEY_GOTHIC_24_BOLD)));
+    font == 3 ? FONT_KEY_GOTHIC_28_BOLD : FONT_KEY_GOTHIC_24_BOLD));
   text_layer_set_text_color(s_detail_title_layer, GColorBlack);
   text_layer_set_background_color(s_detail_title_layer, GColorClear);
-  text_layer_set_overflow_mode(s_detail_title_layer, GTextOverflowModeWordWrap);
   scroll_layer_add_child(s_detail_scroll_layer, text_layer_get_layer(s_detail_title_layer));
-  s_detail_meta_layer = text_layer_create(GRect(margin, 183, width, 150));
-  text_layer_set_font(s_detail_meta_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+  s_detail_meta_layer = text_layer_create(GRect(0, 0, bounds.size.w, 48));
+  text_layer_set_font(s_detail_meta_layer, fonts_get_system_font(
+    font == 1 ? FONT_KEY_GOTHIC_18 : (font == 3 ? FONT_KEY_GOTHIC_28 : FONT_KEY_GOTHIC_24)));
   text_layer_set_text_color(s_detail_meta_layer, GColorBlack);
   text_layer_set_background_color(s_detail_meta_layer, GColorClear);
-  text_layer_set_overflow_mode(s_detail_meta_layer, GTextOverflowModeWordWrap);
   text_layer_set_text(s_detail_meta_layer, s_detail_meta);
   scroll_layer_add_child(s_detail_scroll_layer, text_layer_get_layer(s_detail_meta_layer));
   if (s_event_array && s_selected_event_index < s_total_expected_events) {
     CalendarEvent *ev = &s_event_array[s_selected_event_index];
     text_layer_set_text(s_detail_title_layer, ev->title);
-    static char when[64], begin[16], end[16], date[20];
+    static char when[64], begin[16], finish[16], date[20];
     time_t start = (time_t)ev->timestamp;
     strftime(date, sizeof(date), "%a, %b %d", localtime(&start));
     format_time(begin, sizeof(begin), start);
-    format_time(end, sizeof(end), (time_t)ev->end_timestamp);
-    snprintf(when, sizeof(when), "%s\n%s - %s", date, begin, end);
+    format_time(finish, sizeof(finish), (time_t)ev->end_timestamp);
+    snprintf(when, sizeof(when), "%s\\n%s - %s", date, begin, finish);
     text_layer_set_text(s_detail_time_layer, when);
   }
-  GSize title_size = text_layer_get_content_size(s_detail_title_layer);
-  int meta_y = 69 + title_size.h + 8;
-  GSize meta_size = text_layer_get_content_size(s_detail_meta_layer);
-  layer_set_frame(text_layer_get_layer(s_detail_meta_layer), GRect(margin, meta_y, width, meta_size.h + 16));
-  int content_height = meta_y + meta_size.h + 20;
-  if (content_height < bounds.size.h) content_height = bounds.size.h;
-  layer_set_frame(text_layer_get_layer(s_detail_title_layer),
-      GRect(margin, 69, width, content_height - 69));
-  scroll_layer_set_content_size(s_detail_scroll_layer, GSize(bounds.size.w, content_height));
+  layout_detail_content();
 }
 static void detail_unload(Window *window) {
   text_layer_destroy(s_detail_title_layer);
@@ -424,11 +434,7 @@ static void inbox_handler(DictionaryIterator *iter, void *ctx) {
     snprintf(s_detail_meta, sizeof(s_detail_meta), "%s", detail->value->cstring);
     if (s_detail_meta_layer) {
       text_layer_set_text(s_detail_meta_layer, s_detail_meta);
-      GRect frame = layer_get_frame(text_layer_get_layer(s_detail_meta_layer));
-      GSize size = text_layer_get_content_size(s_detail_meta_layer);
-      frame.size.h = size.h + 16;
-      layer_set_frame(text_layer_get_layer(s_detail_meta_layer), frame);
-      scroll_layer_set_content_size(s_detail_scroll_layer, GSize(scroll_layer_get_content_size(s_detail_scroll_layer).w, frame.origin.y + frame.size.h + 15));
+      layout_detail_content();
     }
     return;
   }
