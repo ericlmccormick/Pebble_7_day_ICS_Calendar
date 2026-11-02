@@ -10,6 +10,7 @@
 #define STORAGE_VERSION 3
 #define PERSIST_KEY_VERSION 99
 #define PERSIST_KEY_SELECTION 98
+#define PERSIST_KEY_FONT_SIZE 97
 // Define the maximum number of distinct day groups (e.g., Today, Tomorrow)
 #define MAX_SECTIONS 10
 // Define the storage key used to save the total number of events
@@ -54,7 +55,9 @@ static bool s_sync_in_progress = false;        // Counter tracking how many even
 static int s_num_sections = 0;                  // How many unique day headers we currently have
 static int s_selected_event_index = 0;
 static int s_restore_event_index = 0;
-static PreferredContentSize s_content_size = PreferredContentSizeMedium;          // The index of the event the user clicked on
+static PreferredContentSize s_content_size = PreferredContentSizeMedium;
+static int s_font_mode = 0; // 0=System, 1=Small, 2=Medium, 3=Large
+          // The index of the event the user clicked on
 static int s_use_24h = 0;                       // Flag: 0 for 12-hour AM/PM format, 1 for 24-hour format
 static CalendarSection s_sections[MAX_SECTIONS];// Array holding the grouping data for the Menu headers
 
@@ -140,12 +143,26 @@ static void update_sections() {
   }
 }
 
+static int effective_font_mode(void) {
+  if (s_font_mode >= 1 && s_font_mode <= 3) return s_font_mode;
+  return (s_content_size >= PreferredContentSizeLarge) ? 3 : 2;
+}
 static int row_height(void) {
-  return (s_content_size >= PreferredContentSizeLarge) ? 64 : 49;
+  switch (effective_font_mode()) {
+    case 1: return 40;
+    case 3: return 64;
+    default: return 49;
+  }
 }
 static const char *event_font(void) {
-  return s_content_size >= PreferredContentSizeLarge ?
-    FONT_KEY_GOTHIC_28_BOLD : FONT_KEY_GOTHIC_24_BOLD;
+  switch (effective_font_mode()) {
+    case 1: return FONT_KEY_GOTHIC_18_BOLD;
+    case 3: return FONT_KEY_GOTHIC_28_BOLD;
+    default: return FONT_KEY_GOTHIC_24_BOLD;
+  }
+}
+static const char *time_font(void) {
+  return effective_font_mode() == 1 ? FONT_KEY_GOTHIC_14 : FONT_KEY_GOTHIC_18;
 }
 static void refresh_glance(void);
 static void restore_selection(void) {
@@ -247,18 +264,18 @@ static void detail_load(Window *window) {
   window_set_background_color(window, GColorWhite);
   int margin = PBL_IF_ROUND_ELSE(22, 10);
   int width = bounds.size.w - 2 * margin;
-  int text_size = (s_content_size >= PreferredContentSizeLarge) ? 28 : 24;
+  int text_size = effective_font_mode();
   s_detail_scroll_layer = scroll_layer_create(bounds);
   scroll_layer_set_click_config_onto_window(s_detail_scroll_layer, window);
   layer_add_child(root, scroll_layer_get_layer(s_detail_scroll_layer));
   s_detail_time_layer = text_layer_create(GRect(margin, 8, width, 58));
-  text_layer_set_font(s_detail_time_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
+  text_layer_set_font(s_detail_time_layer, fonts_get_system_font(text_size == 1 ? FONT_KEY_GOTHIC_14_BOLD : FONT_KEY_GOTHIC_18_BOLD));
   text_layer_set_text_color(s_detail_time_layer, GColorBlack);
   text_layer_set_background_color(s_detail_time_layer, GColorClear);
   scroll_layer_add_child(s_detail_scroll_layer, text_layer_get_layer(s_detail_time_layer));
   s_detail_title_layer = text_layer_create(GRect(margin, 69, width, 110));
   text_layer_set_font(s_detail_title_layer, fonts_get_system_font(
-      text_size == 28 ? FONT_KEY_GOTHIC_28_BOLD : FONT_KEY_GOTHIC_24_BOLD));
+      text_size == 1 ? FONT_KEY_GOTHIC_18_BOLD : (text_size == 3 ? FONT_KEY_GOTHIC_28_BOLD : FONT_KEY_GOTHIC_24_BOLD)));
   text_layer_set_text_color(s_detail_title_layer, GColorBlack);
   text_layer_set_background_color(s_detail_title_layer, GColorClear);
   text_layer_set_overflow_mode(s_detail_title_layer, GTextOverflowModeWordWrap);
@@ -350,7 +367,7 @@ static void draw_row_callback(GContext* ctx, const Layer *l, MenuIndex *i, void 
   bool highlighted = selected.section == i->section && selected.row == i->row;
   graphics_context_set_text_color(ctx, highlighted ? PBL_IF_COLOR_ELSE(GColorBlack, GColorWhite) : GColorBlack); // Keep highlighted text readable
   // Draw the time text in the top half of the row
-  graphics_draw_text(ctx, t_b, fonts_get_system_font(FONT_KEY_GOTHIC_18), GRect(9, 0, layer_get_bounds(l).size.w - 14, 20), 0, GTextAlignmentLeft, NULL);
+  graphics_draw_text(ctx, t_b, fonts_get_system_font(time_font()), GRect(9, 0, layer_get_bounds(l).size.w - 14, 20), 0, GTextAlignmentLeft, NULL);
   // Respect the user's system text size.
   graphics_draw_text(ctx, ev.title, fonts_get_system_font(event_font()), GRect(9, 16, layer_get_bounds(l).size.w - 14, row_height() - 17), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 }
@@ -389,6 +406,15 @@ static void inbox_handler(DictionaryIterator *iter, void *ctx) {
     layer_set_hidden(text_layer_get_layer(s_toast_layer), false);
     menu_layer_reload_data(s_menu_layer);
     return;
+  }
+  Tuple *font_tuple = dict_find(iter, MESSAGE_KEY_FONT_SIZE);
+  if (font_tuple && font_tuple->type == TUPLE_CSTRING) {
+    int mode = atoi(font_tuple->value->cstring);
+    if (mode >= 0 && mode <= 3) {
+      s_font_mode = mode;
+      persist_write_int(PERSIST_KEY_FONT_SIZE, mode);
+      menu_layer_reload_data(s_menu_layer);
+    }
   }
   // 1. Check if the message contains a 12h/24h time format setting update
   Tuple *f_t = dict_find(iter, MESSAGE_KEY_TIME_FORMAT);
@@ -522,6 +548,10 @@ static void init() {
   });
   
   s_content_size = preferred_content_size();
+  if (persist_exists(PERSIST_KEY_FONT_SIZE)) {
+    int saved = persist_read_int(PERSIST_KEY_FONT_SIZE);
+    if (saved >= 0 && saved <= 3) s_font_mode = saved;
+  }
   if (persist_exists(PERSIST_KEY_SELECTION)) s_restore_event_index = persist_read_int(PERSIST_KEY_SELECTION);
   // Load user preference for 12/24 hour time
   if (persist_exists(PERSIST_KEY_TIME_24H)) s_use_24h = persist_read_int(PERSIST_KEY_TIME_24H);
