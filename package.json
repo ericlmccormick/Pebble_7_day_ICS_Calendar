@@ -41,7 +41,7 @@
       "watchface": false
     }
   },
-  "version": "1.4.0",
+  "version": "1.6.0",
   "scripts": {
     "test": "node tests/utf8.test.js && node tests/multi-calendar.test.js"
   }
