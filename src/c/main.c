@@ -342,11 +342,13 @@ static void draw_row_callback(GContext* ctx, const Layer *l, MenuIndex *i, void 
   // Calculate which event this row corresponds to
   CalendarEvent ev = s_event_array[s_sections[i->section].start_index + i->row];
   graphics_context_set_fill_color(ctx, event_color(ev.color));
-  graphics_fill_rect(ctx, GRect(0, 3, 4, 42), 0, GCornerNone);
+  graphics_fill_rect(ctx, GRect(0, 3, 4, row_height() - 6), 0, GCornerNone);
   static char t_b[16]; 
   format_time(t_b, 16, ev.timestamp); // Format the start time
   
-  graphics_context_set_text_color(ctx, GColorBlack); // Set text to black
+  MenuIndex selected = menu_layer_get_selected_index(s_menu_layer);
+  bool highlighted = selected.section == i->section && selected.row == i->row;
+  graphics_context_set_text_color(ctx, highlighted ? PBL_IF_COLOR_ELSE(GColorBlack, GColorWhite) : GColorBlack); // Keep highlighted text readable
   // Draw the time text in the top half of the row
   graphics_draw_text(ctx, t_b, fonts_get_system_font(FONT_KEY_GOTHIC_18), GRect(9, 0, layer_get_bounds(l).size.w - 14, 20), 0, GTextAlignmentLeft, NULL);
   // Respect the user's system text size.
@@ -454,6 +456,7 @@ static void inbox_handler(DictionaryIterator *iter, void *ctx) {
       s_sync_in_progress = false;
       update_sections();
       menu_layer_reload_data(s_menu_layer);
+      restore_selection();
       save_data_to_storage();
       refresh_glance();
       layer_set_hidden(text_layer_get_layer(s_toast_layer), true);
