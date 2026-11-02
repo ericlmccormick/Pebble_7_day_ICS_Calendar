@@ -254,29 +254,35 @@ function detailText(event) {
   var out = [];
   function add(label, value, maximum) {
     if (value === null || value === undefined || value === '') return;
-    var clean = String(value).replace(/\\r/g, '').trim();
+    var clean = String(value).replace(/\r/g, '').trim();
     if (clean.length > maximum) clean = clean.slice(0, maximum - 1) + '…';
-    if (clean) out.push(label + ': ' + clean);
+    if (clean) out.push(label + '\n' + clean);
   }
   if (event.isAllDay) out.push('All day');
-  add('Location', event.location, 80);
-  add('Description', event.description, 130);
-  add('Organizer', event.organizer, 45);
-  add('Link', event.url, 70);
+  add('Location', event.location, 120);
+  add('Description', event.description, 180);
+  add('Organizer', event.organizer, 60);
+  add('Link', event.url, 100);
   add('Status', event.status, 20);
-  add('Category', Array.isArray(event.categories) ? event.categories.join(', ') : event.categories, 30);
-  // Limit by actual UTF-8 byte count, without cutting multibyte characters.
-  var text = out.join('\\n\\n') || 'No additional details';
+  add('Category', Array.isArray(event.categories) ? event.categories.join(', ') : event.categories, 40);
+  var value = out.join('\n\n') || 'No additional details';
+  // Limit by UTF-8 bytes to stay within Pebble's AppMessage inbox.
   var result = '', length = 0;
-  for (var i = 0; i < text.length; i++) {
-    var cp = text.charCodeAt(i);
+  for (var i = 0; i < value.length; i++) {
+    var cp = value.charCodeAt(i);
     var width = cp < 0x80 ? 1 : cp < 0x800 ? 2 : 3;
-    if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < text.length) {
-      var next = text.charCodeAt(i + 1);
-      if (next >= 0xDC00 && next <= 0xDFFF) { width = 4; if (length + width > 345) break; result += text.charAt(i++) + text.charAt(i); length += width; continue; }
+    if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < value.length) {
+      var next = value.charCodeAt(i + 1);
+      if (next >= 0xDC00 && next <= 0xDFFF) {
+        if (length + 4 > 345) break;
+        result += value.charAt(i++) + value.charAt(i);
+        length += 4;
+        continue;
+      }
     }
     if (length + width > 345) break;
-    result += text.charAt(i); length += width;
+    result += value.charAt(i);
+    length += width;
   }
   return result;
 }
