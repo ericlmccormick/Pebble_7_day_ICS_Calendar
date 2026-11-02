@@ -9,6 +9,8 @@
 #define MAX_EVENTS 48
 #define STORAGE_VERSION 3
 #define PERSIST_KEY_VERSION 99
+#define PERSIST_KEY_SELECTION 98
+#define PERSIST_KEY_FONT_SIZE 97
 // Define the maximum number of distinct day groups (e.g., Today, Tomorrow)
 #define MAX_SECTIONS 10
 // Define the storage key used to save the total number of events
@@ -38,6 +40,7 @@ typedef struct {
 static Window *s_main_window;           // The main application window
 static Window *s_detail_window = NULL;  // The window that pops up to show event details
 static MenuLayer *s_menu_layer;         // The scrolling list layer for the main window
+static ScrollLayer *s_detail_scroll_layer;
 static TextLayer *s_detail_title_layer; // The text layer showing the event title in the detail window
 static TextLayer *s_detail_time_layer;  // The text layer showing the event time in the detail window
 static TextLayer *s_toast_layer;        // The notification layer for the "Syncing..." status
@@ -50,7 +53,11 @@ static int s_events_received_so_far = 0;
 static int s_next_chunk = 0;
 static bool s_sync_in_progress = false;        // Counter tracking how many events have successfully arrived
 static int s_num_sections = 0;                  // How many unique day headers we currently have
-static int s_selected_event_index = 0;          // The index of the event the user clicked on
+static int s_selected_event_index = 0;
+static int s_restore_event_index = 0;
+static PreferredContentSize s_content_size = PreferredContentSizeMedium;
+static int s_font_mode = 0; // 0=System, 1=Small, 2=Medium, 3=Large
+          // The index of the event the user clicked on
 static int s_use_24h = 0;                       // Flag: 0 for 12-hour AM/PM format, 1 for 24-hour format
 static CalendarSection s_sections[MAX_SECTIONS];// Array holding the grouping data for the Menu headers
 
@@ -136,6 +143,70 @@ static void update_sections() {
   }
 }
 
+static int effective_font_mode(void) {
+  if (s_font_mode >= 1 && s_font_mode <= 3) return s_font_mode;
+  return (s_content_size >= PreferredContentSizeLarge) ? 3 : 2;
+}
+static int row_height(void) {
+  switch (effective_font_mode()) {
+    case 1: return 40;
+    case 3: return 64;
+    default: return 49;
+  }
+}
+static const char *event_font(void) {
+  switch (effective_font_mode()) {
+    case 1: return FONT_KEY_GOTHIC_18_BOLD;
+    case 3: return FONT_KEY_GOTHIC_28_BOLD;
+    default: return FONT_KEY_GOTHIC_24_BOLD;
+  }
+}
+static const char *time_font(void) {
+  return effective_font_mode() == 1 ? FONT_KEY_GOTHIC_14 : FONT_KEY_GOTHIC_18;
+}
+static void refresh_glance(void);
+static void restore_selection(void) {
+  if (!s_menu_layer || s_total_expected_events <= 0) return;
+  int index = s_restore_event_index;
+  if (index >= s_total_expected_events) index = s_total_expected_events - 1;
+  if (index < 0) index = 0;
+  for (int section = 0; section < s_num_sections; section++) {
+    if (index >= s_sections[section].start_index &&
+        index < s_sections[section].start_index + s_sections[section].count) {
+      menu_layer_set_selected_index(s_menu_layer,
+          (MenuIndex){.section=section,.row=index-s_sections[section].start_index},
+          MenuRowAlignCenter, false);
+      return;
+    }
+  }
+}
+#if !PBL_PLATFORM_APLITE
+static void glance_callback(AppGlanceReloadSession *session, size_t limit, void *context) {
+  if (!limit) return;
+  char subtitle[96] = "No upcoming events";
+  time_t now = time(NULL);
+  if (s_event_array) {
+    for (int i=0; i<s_total_expected_events; i++) {
+      if ((time_t)s_event_array[i].end_timestamp < now) continue;
+      char start[16];
+      format_time(start, sizeof(start), (time_t)s_event_array[i].timestamp);
+      snprintf(subtitle, sizeof(subtitle), "%s %s", start, s_event_array[i].title);
+      break;
+    }
+  }
+  AppGlanceSlice slice = {
+    .expiration_time = APP_GLANCE_SLICE_NO_EXPIRATION,
+    .layout = {.icon=APP_GLANCE_SLICE_DEFAULT_ICON,.subtitle_template_string=subtitle}
+  };
+  app_glance_add_slice(session, slice);
+}
+#endif
+static void refresh_glance(void) {
+#if !PBL_PLATFORM_APLITE
+  app_glance_reload(glance_callback, NULL);
+#endif
+}
+
 // --- Persistence Functions ---
 
 // Saves the event array into the watch's permanent memory in small chunks
@@ -188,43 +259,49 @@ static void load_data_from_storage() {
 
 // Sets up the UI elements when the Detail Window is opened
 static void detail_load(Window *window) {
-  Layer *root = window_get_root_layer(window); // Get the root layer of the window
-  GRect b = layer_get_frame(root); // Get the physical dimensions of the screen
-  window_set_background_color(window, GColorWhite); // Set the background to solid white
-  
-  // Create the text layer for the date and time, positioned at the top
-  s_detail_time_layer = text_layer_create(GRect(10, 5, b.size.w - 20, 70));
-  text_layer_set_font(s_detail_time_layer, fonts_get_system_font(FONT_KEY_GOTHIC_24)); // Set font
-  text_layer_set_text_color(s_detail_time_layer, GColorBlack); // Set text to black
-  layer_add_child(root, text_layer_get_layer(s_detail_time_layer)); // Add it to the window
-  
-  // Create the text layer for the event title, positioned below the time
-  s_detail_title_layer = text_layer_create(GRect(10, 75, b.size.w - 20, 140));
-  text_layer_set_font(s_detail_title_layer, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD)); // Set font to bold
-  text_layer_set_text_color(s_detail_title_layer, GColorBlack); // Set text to black
-  text_layer_set_overflow_mode(s_detail_title_layer, GTextOverflowModeWordWrap); // Allow long titles to wrap to multiple lines
-  layer_add_child(root, text_layer_get_layer(s_detail_title_layer)); // Add it to the window
-
-  // Populate the fields with data from the selected event
+  Layer *root = window_get_root_layer(window);
+  GRect bounds = layer_get_bounds(root);
+  window_set_background_color(window, GColorWhite);
+  int margin = PBL_IF_ROUND_ELSE(22, 10);
+  int width = bounds.size.w - 2 * margin;
+  int text_size = effective_font_mode();
+  s_detail_scroll_layer = scroll_layer_create(bounds);
+  scroll_layer_set_click_config_onto_window(s_detail_scroll_layer, window);
+  layer_add_child(root, scroll_layer_get_layer(s_detail_scroll_layer));
+  s_detail_time_layer = text_layer_create(GRect(margin, 8, width, 58));
+  text_layer_set_font(s_detail_time_layer, fonts_get_system_font(text_size == 1 ? FONT_KEY_GOTHIC_14_BOLD : FONT_KEY_GOTHIC_18_BOLD));
+  text_layer_set_text_color(s_detail_time_layer, GColorBlack);
+  text_layer_set_background_color(s_detail_time_layer, GColorClear);
+  scroll_layer_add_child(s_detail_scroll_layer, text_layer_get_layer(s_detail_time_layer));
+  s_detail_title_layer = text_layer_create(GRect(margin, 69, width, 110));
+  text_layer_set_font(s_detail_title_layer, fonts_get_system_font(
+      text_size == 1 ? FONT_KEY_GOTHIC_18_BOLD : (text_size == 3 ? FONT_KEY_GOTHIC_28_BOLD : FONT_KEY_GOTHIC_24_BOLD)));
+  text_layer_set_text_color(s_detail_title_layer, GColorBlack);
+  text_layer_set_background_color(s_detail_title_layer, GColorClear);
+  text_layer_set_overflow_mode(s_detail_title_layer, GTextOverflowModeWordWrap);
+  scroll_layer_add_child(s_detail_scroll_layer, text_layer_get_layer(s_detail_title_layer));
   if (s_event_array && s_selected_event_index < s_total_expected_events) {
-    CalendarEvent ev = s_event_array[s_selected_event_index]; // Grab the specific event from the array
-    text_layer_set_text(s_detail_title_layer, s_event_array[s_selected_event_index].title); // Point text layer to the title memory
-    
-    // Create a temporary string buffer to format the date and time
-    static char when[64], s_b[16], e_b[16], d_b[16];
-    time_t st = (time_t)ev.timestamp; // Get start time
-    strftime(d_b, 16, "%a, %b %d", localtime(&st)); // Format the date (e.g., "Mon, Jan 01")
-    format_time(s_b, 16, st); // Format the start time
-    format_time(e_b, 16, (time_t)ev.end_timestamp); // Format the end time
-    snprintf(when, 64, "%s\n%s - %s", d_b, s_b, e_b); // Combine them into one string separated by newlines
-    text_layer_set_text(s_detail_time_layer, when); // Display the combined string
+    CalendarEvent *ev = &s_event_array[s_selected_event_index];
+    text_layer_set_text(s_detail_title_layer, ev->title);
+    static char when[64], begin[16], end[16], date[20];
+    time_t start = (time_t)ev->timestamp;
+    strftime(date, sizeof(date), "%a, %b %d", localtime(&start));
+    format_time(begin, sizeof(begin), start);
+    format_time(end, sizeof(end), (time_t)ev->end_timestamp);
+    snprintf(when, sizeof(when), "%s\n%s - %s", date, begin, end);
+    text_layer_set_text(s_detail_time_layer, when);
   }
+  GSize title_size = text_layer_get_content_size(s_detail_title_layer);
+  int content_height = 69 + title_size.h + 20;
+  if (content_height < bounds.size.h) content_height = bounds.size.h;
+  layer_set_frame(text_layer_get_layer(s_detail_title_layer),
+      GRect(margin, 69, width, content_height - 69));
+  scroll_layer_set_content_size(s_detail_scroll_layer, GSize(bounds.size.w, content_height));
 }
-
-// Cleans up memory when the Detail Window is closed
 static void detail_unload(Window *window) {
-  text_layer_destroy(s_detail_title_layer); // Destroy the title text layer
-  text_layer_destroy(s_detail_time_layer);  // Destroy the time text layer
+  text_layer_destroy(s_detail_title_layer);
+  text_layer_destroy(s_detail_time_layer);
+  scroll_layer_destroy(s_detail_scroll_layer);
 }
 
 // Opens the detail window for a specific event index
@@ -260,7 +337,7 @@ static int16_t get_head_h_callback(MenuLayer *m, uint16_t s, void *d) {
 
 // Tells the MenuLayer how tall each event row should be
 static int16_t get_cell_h_callback(MenuLayer *m, MenuIndex *i, void *d) { 
-  return 48; // Set every row to 48 pixels tall
+  return row_height();
 }
 
 // Draws the visual design of the headers (Today, Tomorrow, etc.)
@@ -282,20 +359,24 @@ static void draw_row_callback(GContext* ctx, const Layer *l, MenuIndex *i, void 
   // Calculate which event this row corresponds to
   CalendarEvent ev = s_event_array[s_sections[i->section].start_index + i->row];
   graphics_context_set_fill_color(ctx, event_color(ev.color));
-  graphics_fill_rect(ctx, GRect(0, 3, 4, 42), 0, GCornerNone);
+  graphics_fill_rect(ctx, GRect(0, 3, 4, row_height() - 6), 0, GCornerNone);
   static char t_b[16]; 
   format_time(t_b, 16, ev.timestamp); // Format the start time
   
-  graphics_context_set_text_color(ctx, GColorBlack); // Set text to black
+  MenuIndex selected = menu_layer_get_selected_index(s_menu_layer);
+  bool highlighted = selected.section == i->section && selected.row == i->row;
+  graphics_context_set_text_color(ctx, highlighted ? PBL_IF_COLOR_ELSE(GColorBlack, GColorWhite) : GColorBlack); // Keep highlighted text readable
   // Draw the time text in the top half of the row
-  graphics_draw_text(ctx, t_b, fonts_get_system_font(FONT_KEY_GOTHIC_18), GRect(9, 0, layer_get_bounds(l).size.w - 14, 20), 0, GTextAlignmentLeft, NULL);
-  // Draw the title text in the bottom half of the row, bolded
-  graphics_draw_text(ctx, ev.title, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), GRect(9, 16, layer_get_bounds(l).size.w - 14, 30), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  graphics_draw_text(ctx, t_b, fonts_get_system_font(time_font()), GRect(9, 0, layer_get_bounds(l).size.w - 14, 20), 0, GTextAlignmentLeft, NULL);
+  // Respect the user's system text size.
+  graphics_draw_text(ctx, ev.title, fonts_get_system_font(event_font()), GRect(9, 16, layer_get_bounds(l).size.w - 14, row_height() - 17), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 }
 
 // Handles what happens when the user clicks the "Select" (middle) button on a row
 static void select_click_callback(MenuLayer *m, MenuIndex *i, void *d) { 
   if(s_num_sections > 0) { // If actual data exists
+    s_restore_event_index = s_sections[i->section].start_index + i->row;
+    persist_write_int(PERSIST_KEY_SELECTION, s_restore_event_index);
     show_detail(s_sections[i->section].start_index + i->row); // Open the detail window for that specific event
   }
 }
@@ -325,6 +406,15 @@ static void inbox_handler(DictionaryIterator *iter, void *ctx) {
     layer_set_hidden(text_layer_get_layer(s_toast_layer), false);
     menu_layer_reload_data(s_menu_layer);
     return;
+  }
+  Tuple *font_tuple = dict_find(iter, MESSAGE_KEY_FONT_SIZE);
+  if (font_tuple && font_tuple->type == TUPLE_CSTRING) {
+    int mode = atoi(font_tuple->value->cstring);
+    if (mode >= 0 && mode <= 3) {
+      s_font_mode = mode;
+      persist_write_int(PERSIST_KEY_FONT_SIZE, mode);
+      menu_layer_reload_data(s_menu_layer);
+    }
   }
   // 1. Check if the message contains a 12h/24h time format setting update
   Tuple *f_t = dict_find(iter, MESSAGE_KEY_TIME_FORMAT);
@@ -360,6 +450,7 @@ static void inbox_handler(DictionaryIterator *iter, void *ctx) {
       persist_write_int(PERSIST_KEY_VERSION, STORAGE_VERSION);
       persist_write_int(PERSIST_KEY_COUNT, 0);
       menu_layer_reload_data(s_menu_layer);
+      refresh_glance();
       layer_set_hidden(text_layer_get_layer(s_toast_layer), true);
       return;
     }
@@ -391,7 +482,9 @@ static void inbox_handler(DictionaryIterator *iter, void *ctx) {
       s_sync_in_progress = false;
       update_sections();
       menu_layer_reload_data(s_menu_layer);
+      restore_selection();
       save_data_to_storage();
+      refresh_glance();
       layer_set_hidden(text_layer_get_layer(s_toast_layer), true);
     }
   }
@@ -454,6 +547,12 @@ static void init() {
     .unload = main_unload
   });
   
+  s_content_size = preferred_content_size();
+  if (persist_exists(PERSIST_KEY_FONT_SIZE)) {
+    int saved = persist_read_int(PERSIST_KEY_FONT_SIZE);
+    if (saved >= 0 && saved <= 3) s_font_mode = saved;
+  }
+  if (persist_exists(PERSIST_KEY_SELECTION)) s_restore_event_index = persist_read_int(PERSIST_KEY_SELECTION);
   // Load user preference for 12/24 hour time
   if (persist_exists(PERSIST_KEY_TIME_24H)) s_use_24h = persist_read_int(PERSIST_KEY_TIME_24H);
   
@@ -462,6 +561,7 @@ static void init() {
   
   // Push the main window onto the screen
   window_stack_push(s_main_window, true);
+  restore_selection();
   
   // Register the function to listen for Bluetooth messages
   app_message_register_inbox_received(inbox_handler);

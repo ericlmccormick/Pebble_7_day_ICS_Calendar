@@ -296,9 +296,16 @@ Pebble.addEventListener('webviewclosed', function(e) {
     }
   }
   // Avoid sending long, private ICS URLs through AppMessage.
+  var watchPrefs = {};
   if (dict[messageKeys.TIME_FORMAT] !== undefined) {
-    Pebble.sendAppMessage({TIME_FORMAT: dict[messageKeys.TIME_FORMAT]},
-      function(){}, function(){ console.log('JS: Time format update failed'); });
+    watchPrefs.TIME_FORMAT = dict[messageKeys.TIME_FORMAT];
+  }
+  if (dict[messageKeys.FONT_SIZE] !== undefined) {
+    watchPrefs.FONT_SIZE = String(dict[messageKeys.FONT_SIZE]);
+  }
+  if (Object.keys(watchPrefs).length) {
+    Pebble.sendAppMessage(watchPrefs, function(){},
+      function(){ console.log('JS: Watch preference update failed'); });
   }
   localStorage.removeItem('last_fetch_time');
   fetchIcal();

@@ -144,6 +144,18 @@ module.exports = [
       },
       {
         "type": "select",
+        "messageKey": "FONT_SIZE",
+        "defaultValue": "0",
+        "label": "Event Font Size",
+        "options": [
+          { "label": "System Default", "value": "0" },
+          { "label": "Small", "value": "1" },
+          { "label": "Medium", "value": "2" },
+          { "label": "Large", "value": "3" }
+        ]
+      },
+      {
+        "type": "select",
         "messageKey": "TIME_FORMAT",
         "defaultValue": "12h",
         "label": "Time Format",
