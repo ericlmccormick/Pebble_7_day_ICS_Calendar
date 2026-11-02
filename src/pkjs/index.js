@@ -15,13 +15,15 @@ var clay = new Clay(clayConfig, null, { autoHandleEvents: false });
 var CHUNK_SIZE = 2;
 var MAX_EVENTS = 48;
 var syncBusy = false;
-var pendingRefresh = false;
+// Duplicate sync triggers during an active fetch are ignored.
+// Pebble 'ready' and the watch's initial sync ping often overlap.
 // How many bytes a single CalendarEvent struct takes up in C (8 bytes for time + 56 bytes for title = 64)
 var BYTES_PER_EVENT = 65; 
 // How many minutes the phone will wait before bothering Google for a fresh update
 var CACHE_MINUTES = 30;
 // The URL of your deployed Google Apps Script (The Proxy)
-var PROXY_URL = 'https://script.google.com/macros/s/AKfycby4NxpqCm9IYW3ijM_8UI1S95dNquYAF2wYm9sGxxveTrEcZ1yL5Gu5KUcDbMS5OoYB/exec';
+var PROXY_URL = 'https://script.google.com/macros/s/AKfycbx1jdy_MFdaIuR6OwV9SvaXv7_EZWHBQboY8XjLEO2xFOkAEfefh87OWKBRIzXEeuM5tg/exec';
+var latestEvents = [];
 
 // Encode titles as UTF-8 without splitting a multi-byte character.
 // The C CalendarEvent struct reserves 56 bytes for its null-terminated title.
@@ -99,10 +101,18 @@ function fetchOneCalendar(url, callback) {
   req.timeout = 15000;
   req.onreadystatechange = function() {
     if (req.readyState !== 4 || finished) return;
+    if (req.status === 0) {
+      return finish('No HTTP response (network, redirect, authentication, or CORS)');
+    }
     if (req.status !== 200) return finish('HTTP ' + req.status);
     try {
       var data = JSON.parse(req.responseText);
-      if (!Array.isArray(data)) throw new Error('Response is not an array');
+      if (!Array.isArray(data)) {
+        var explanation = data && typeof data === 'object' ?
+          (data.error || data.message || data.status || 'Unexpected JSON object') :
+          'Unexpected JSON value';
+        throw new Error('ICS proxy returned an error instead of events: ' + String(explanation).slice(0, 160));
+      }
       var valid = [];
       for (var i = 0; i < data.length; i++) {
         var ev = data[i];
@@ -117,7 +127,7 @@ function fetchOneCalendar(url, callback) {
       finish('Invalid response: ' + e.message);
     }
   };
-  req.onerror = function() { finish('Network error'); };
+  req.onerror = function() { finish('Network error / response blocked'); };
   req.ontimeout = function() { finish('Request timeout'); };
   try { req.send(null); } catch (e) { finish('Request failed'); }
 }
@@ -125,7 +135,10 @@ function fetchOneCalendar(url, callback) {
 // Fetch up to three feeds sequentially to limit load on phones and the proxy.
 // Commit a new combined calendar only when ALL configured feeds succeed.
 function fetchIcal() {
-  if (syncBusy) { pendingRefresh = true; return; }
+  if (syncBusy) {
+    console.log('JS: Sync already running; ignoring duplicate request.');
+    return;
+  }
   var urls = getCalendarSources();
   if (!urls.length) return;
   syncBusy = true;
@@ -136,17 +149,18 @@ function fetchIcal() {
       Pebble.sendAppMessage({SYNC_STATUS: 'error'}, function(){}, function(){});
     }
     syncBusy = false;
-    if (pendingRefresh) {
-      pendingRefresh = false;
-      fetchIcal();
-    }
+
   }
   function next() {
     if (index >= urls.length) {
       all.sort(function(a, b) { return Number(a.timestampMs) - Number(b.timestampMs); });
       var watchInfo = Pebble.getActiveWatchInfo ? Pebble.getActiveWatchInfo() : null;
       var limit = (watchInfo && watchInfo.platform === 'aplite') ? 20 : MAX_EVENTS;
-      sendEventByteArray(all.slice(0, limit), 0, finishSync);
+      var selected = all.slice(0, limit);
+      sendEventByteArray(selected, 0, function(success) {
+        if (success) latestEvents = selected;
+        finishSync(success);
+      });
       return;
     }
     var feedNumber = ++index;
@@ -239,6 +253,46 @@ function sendEventByteArray(events, start, done) {
   });
 }
 
+// Keep detailed metadata on the phone rather than in the watch's event array.
+// AppMessage strings are UTF-8; bound the total text for older watch buffers.
+function detailText(event) {
+  if (!event) return 'Details unavailable. Refresh calendar.';
+  var out = [];
+  function add(label, value, maximum) {
+    if (value === null || value === undefined || value === '') return;
+    var clean = String(value).replace(/\r/g, '').trim();
+    if (clean.length > maximum) clean = clean.slice(0, maximum - 1) + '…';
+    if (clean) out.push(label + '\n' + clean);
+  }
+  if (event.isAllDay) out.push('All day');
+  add('Location', event.location, 120);
+  add('Description', event.description, 180);
+  add('Organizer', event.organizer, 60);
+  add('Link', event.url, 100);
+  add('Status', event.status, 20);
+  add('Category', Array.isArray(event.categories) ? event.categories.join(', ') : event.categories, 40);
+  var value = out.join('\n\n') || 'No additional details';
+  // Limit by UTF-8 bytes to stay within Pebble's AppMessage inbox.
+  var result = '', length = 0;
+  for (var i = 0; i < value.length; i++) {
+    var cp = value.charCodeAt(i);
+    var width = cp < 0x80 ? 1 : cp < 0x800 ? 2 : 3;
+    if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < value.length) {
+      var next = value.charCodeAt(i + 1);
+      if (next >= 0xDC00 && next <= 0xDFFF) {
+        if (length + 4 > 345) break;
+        result += value.charAt(i++) + value.charAt(i);
+        length += 4;
+        continue;
+      }
+    }
+    if (length + width > 345) break;
+    result += value.charAt(i);
+    length += width;
+  }
+  return result;
+}
+
 // --- App Event Listeners ---
 
 // Fired the moment the app boots up on the watch
@@ -257,7 +311,9 @@ Pebble.addEventListener('ready', function() {
       console.log('JS: Cache expired. Initiating background sync...');
       fetchIcal();
     } else {
-      console.log('JS: Data is fresh. Watch will use its own internal storage.');
+      // The watch has cached compact events, but the companion's detailed
+      // metadata is in RAM and must be repopulated after a phone restart.
+      fetchIcal();
     }
   }
 });
@@ -265,6 +321,12 @@ Pebble.addEventListener('ready', function() {
 // Fired when the watch specifically asks the phone for help (The "Help Signal")
 // This happens if the watch's internal storage gets wiped and it needs data IMMEDIATELY
 Pebble.addEventListener('appmessage', function(e) {
+  if (e.payload && e.payload.DETAIL_REQUEST !== undefined) {
+    var index = Number(e.payload.DETAIL_REQUEST);
+    var message = detailText(latestEvents[index]);
+    Pebble.sendAppMessage({DETAIL_TEXT: message}, function(){}, function(){});
+    return;
+  }
   console.log('JS: Watch requested an emergency data sync!');
   if (getCalendarSources().length) fetchIcal(); // Force all configured calendars
 });
