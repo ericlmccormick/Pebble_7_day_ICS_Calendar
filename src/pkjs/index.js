@@ -296,7 +296,9 @@ Pebble.addEventListener('ready', function() {
       console.log('JS: Cache expired. Initiating background sync...');
       fetchIcal();
     } else {
-      console.log('JS: Data is fresh. Watch will use its own internal storage.');
+      // The watch has cached compact events, but the companion's detailed
+      // metadata is in RAM and must be repopulated after a phone restart.
+      fetchIcal();
     }
   }
 });
