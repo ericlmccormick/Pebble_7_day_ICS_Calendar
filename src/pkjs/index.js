@@ -15,7 +15,8 @@ var clay = new Clay(clayConfig, null, { autoHandleEvents: false });
 var CHUNK_SIZE = 2;
 var MAX_EVENTS = 48;
 var syncBusy = false;
-var pendingRefresh = false;
+// Duplicate sync triggers during an active fetch are ignored.
+// Pebble 'ready' and the watch's initial sync ping often overlap.
 // How many bytes a single CalendarEvent struct takes up in C (8 bytes for time + 56 bytes for title = 64)
 var BYTES_PER_EVENT = 65; 
 // How many minutes the phone will wait before bothering Google for a fresh update
@@ -106,7 +107,12 @@ function fetchOneCalendar(url, callback) {
     if (req.status !== 200) return finish('HTTP ' + req.status);
     try {
       var data = JSON.parse(req.responseText);
-      if (!Array.isArray(data)) throw new Error('Response is not an array');
+      if (!Array.isArray(data)) {
+        var explanation = data && typeof data === 'object' ?
+          (data.error || data.message || data.status || 'Unexpected JSON object') :
+          'Unexpected JSON value';
+        throw new Error('ICS proxy returned an error instead of events: ' + String(explanation).slice(0, 160));
+      }
       var valid = [];
       for (var i = 0; i < data.length; i++) {
         var ev = data[i];
@@ -129,7 +135,10 @@ function fetchOneCalendar(url, callback) {
 // Fetch up to three feeds sequentially to limit load on phones and the proxy.
 // Commit a new combined calendar only when ALL configured feeds succeed.
 function fetchIcal() {
-  if (syncBusy) { pendingRefresh = true; return; }
+  if (syncBusy) {
+    console.log('JS: Sync already running; ignoring duplicate request.');
+    return;
+  }
   var urls = getCalendarSources();
   if (!urls.length) return;
   syncBusy = true;
@@ -140,10 +149,7 @@ function fetchIcal() {
       Pebble.sendAppMessage({SYNC_STATUS: 'error'}, function(){}, function(){});
     }
     syncBusy = false;
-    if (pendingRefresh) {
-      pendingRefresh = false;
-      fetchIcal();
-    }
+
   }
   function next() {
     if (index >= urls.length) {
