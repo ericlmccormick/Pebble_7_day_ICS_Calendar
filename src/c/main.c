@@ -315,7 +315,7 @@ static void detail_load(Window *window) {
     strftime(date, sizeof(date), "%a, %b %d", localtime(&start));
     format_time(begin, sizeof(begin), start);
     format_time(finish, sizeof(finish), (time_t)ev->end_timestamp);
-    snprintf(when, sizeof(when), "%s\\n%s - %s", date, begin, finish);
+    snprintf(when, sizeof(when), "%s\n%s - %s", date, begin, finish);
     text_layer_set_text(s_detail_time_layer, when);
   }
   layout_detail_content();
