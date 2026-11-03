@@ -52,7 +52,10 @@ static ScrollLayer *s_detail_scroll_layer;
 static TextLayer *s_detail_title_layer; // The text layer showing the event title in the detail window
 static TextLayer *s_detail_time_layer;
 static TextLayer *s_detail_meta_layer;
-static char s_detail_meta[360] = "Loading details...";  // The text layer showing the event time in the detail window
+static char s_detail_meta[360] = "Loading details...";
+static char s_detail_title_copy[MAX_TITLE_LEN];
+static AppTimer *s_detail_timeout=NULL;
+static int32_t s_detail_request_token=0;  // The text layer showing the event time in the detail window
 static TextLayer *s_toast_layer;        // The notification layer for the "Syncing..." status
 
 // --- Global Data Variables ---
@@ -339,7 +342,8 @@ static void detail_load(Window *window) {
   scroll_layer_add_child(s_detail_scroll_layer, text_layer_get_layer(s_detail_meta_layer));
   if (s_event_array && s_selected_event_index < s_total_expected_events) {
     CalendarEvent *ev = &s_event_array[s_selected_event_index];
-    text_layer_set_text(s_detail_title_layer, ev->title);
+    snprintf(s_detail_title_copy, sizeof(s_detail_title_copy), "%s", ev->title);
+    text_layer_set_text(s_detail_title_layer, s_detail_title_copy);
     static char when[64], begin[16], finish[16], date[20];
     time_t start = (time_t)ev->timestamp;
     strftime(date, sizeof(date), "%a, %b %d", localtime(&start));
@@ -351,6 +355,7 @@ static void detail_load(Window *window) {
   layout_detail_content();
 }
 static void detail_unload(Window *window) {
+  if (s_detail_timeout) { app_timer_cancel(s_detail_timeout); s_detail_timeout=NULL; }
   text_layer_destroy(s_detail_title_layer);
   text_layer_destroy(s_detail_time_layer);
   text_layer_destroy(s_detail_meta_layer);
@@ -359,10 +364,20 @@ static void detail_unload(Window *window) {
   if (s_detail_status_bar) { status_bar_layer_destroy(s_detail_status_bar); s_detail_status_bar = NULL; }
 }
 
+static void detail_timeout_callback(void *context) {
+  s_detail_timeout=NULL;
+  if (!s_detail_meta_layer || strcmp(s_detail_meta, "Loading details...")!=0) return;
+  snprintf(s_detail_meta, sizeof(s_detail_meta), "Details unavailable offline.\\nThe event list is saved on your watch.");
+  text_layer_set_text(s_detail_meta_layer, s_detail_meta);
+  layout_detail_content();
+}
+
 // Opens the detail window for a specific event index
 static void show_detail(int index) {
   if (!s_event_array || index < 0 || index >= s_total_expected_events) return;
+  if (s_detail_timeout) { app_timer_cancel(s_detail_timeout); s_detail_timeout=NULL; }
   snprintf(s_detail_meta, sizeof(s_detail_meta), "Loading details...");
+  s_detail_request_token++;
   s_selected_event_index = index; // Save the clicked index to the global variable
   if (!s_detail_window) { // If the window doesn't exist yet, create it
     s_detail_window = window_create();
@@ -375,8 +390,10 @@ static void show_detail(int index) {
   DictionaryIterator *request;
   if (app_message_outbox_begin(&request) == APP_MSG_OK) {
     dict_write_int32(request, MESSAGE_KEY_DETAIL_REQUEST, index);
+    dict_write_int32(request, MESSAGE_KEY_DETAIL_TOKEN, s_detail_request_token);
     app_message_outbox_send();
   }
+  s_detail_timeout=app_timer_register(8000,detail_timeout_callback,NULL);
 }
 
 // --- MenuLayer Callbacks ---
@@ -662,6 +679,9 @@ static void finish_calendar_sync(CalendarEvent *incoming, int total, uint32_t id
 static void inbox_handler(DictionaryIterator *iter, void *ctx) {
   Tuple *detail=dict_find(iter, MESSAGE_KEY_DETAIL_TEXT);
   if (detail && detail->type == TUPLE_CSTRING) {
+    Tuple *token=dict_find(iter, MESSAGE_KEY_DETAIL_TOKEN);
+    if (!token || token->value->int32 != s_detail_request_token) return;
+    if (s_detail_timeout) { app_timer_cancel(s_detail_timeout); s_detail_timeout=NULL; }
     snprintf(s_detail_meta, sizeof(s_detail_meta), "%s", detail->value->cstring);
     if (s_detail_meta_layer) {
       text_layer_set_text(s_detail_meta_layer, s_detail_meta);
@@ -673,7 +693,7 @@ static void inbox_handler(DictionaryIterator *iter, void *ctx) {
   if (status && status->type == TUPLE_CSTRING) {
     if (strcmp(status->value->cstring, "error") == 0) {
       s_sync_in_progress=false;
-      text_layer_set_text(s_toast_layer, "Sync failed; showing cached");
+      text_layer_set_text(s_toast_layer, "Sync failed (cached)");
       layer_set_hidden(text_layer_get_layer(s_toast_layer), false);
       menu_layer_reload_data(s_menu_layer);
     }
