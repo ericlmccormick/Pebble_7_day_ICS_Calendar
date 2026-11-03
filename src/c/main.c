@@ -77,7 +77,12 @@ static bool s_show_past = false;
 static bool s_show_status_bar = false;
 static int s_time_mode = 0; // 0=System, 1=12h, 2=24h
 static time_t s_last_sync = 0;
-static uint32_t s_active_sync_id = 0, s_completed_sync_id = 0;// Array holding the grouping data for the Menu headers
+static uint32_t s_active_sync_id = 0, s_completed_sync_id = 0;
+static uint32_t s_transfer_checksum = 1, s_expected_checksum = 1;
+static int s_ack_chunk = -1;
+static uint32_t s_ack_id = 0;
+static int s_ack_attempts = 0;
+static AppTimer *s_ack_timer = NULL;// Array holding the grouping data for the Menu headers
 
 // --- Helper Functions ---
 // Muted source markers; monochrome watches use black bars.
@@ -437,6 +442,7 @@ static void select_click_callback(MenuLayer *m, MenuIndex *i, void *d) {
 }
 
 // Handles what happens when the user LONG-PRESSES the "Select" (middle) button on a row
+static void open_settings(void);
 static void select_long_click_callback(MenuLayer *m, MenuIndex *i, void *d) {
   open_settings();
 }
@@ -581,12 +587,60 @@ static void minute_tick(struct tm *tick_time, TimeUnits changed) {
   apply_main_theme();
 }
 
-// --- Communications ---
-
-// Handles all incoming messages from the phone (JavaScript)
+// --- Transactional AppMessage transport, using a watch-side ACK per chunk. ---
+static uint32_t checksum_bytes(uint32_t checksum, const uint8_t *bytes, size_t length) {
+  uint32_t a=checksum & 65535, b=(checksum >> 16) & 65535;
+  for (size_t i=0; i<length; i++) {
+    a=(a+bytes[i])%65521;
+    b=(b+a)%65521;
+  }
+  return (b<<16)|a;
+}
+static void retry_ack(void *context);
+static void send_ack(uint32_t id, int index) {
+  if (s_ack_timer) { app_timer_cancel(s_ack_timer); s_ack_timer=NULL; }
+  if (s_ack_id != id || s_ack_chunk != index) s_ack_attempts=0;
+  s_ack_id=id;
+  s_ack_chunk=index;
+  DictionaryIterator *out=NULL;
+  AppMessageResult result=app_message_outbox_begin(&out);
+  if (result == APP_MSG_OK && out) {
+    dict_write_int32(out, MESSAGE_KEY_SYNC_ID, (int32_t)id);
+    dict_write_int32(out, MESSAGE_KEY_CHUNK_ACK, index);
+    result=app_message_outbox_send();
+  }
+  if (result != APP_MSG_OK && s_ack_attempts++ < 5) {
+    s_ack_timer=app_timer_register(250, retry_ack, NULL);
+  }
+}
+static void retry_ack(void *context) {
+  s_ack_timer=NULL;
+  if (s_ack_chunk >= 0) send_ack(s_ack_id, s_ack_chunk);
+}
+static void ack_outbox_failed(DictionaryIterator *iter, AppMessageResult reason, void *context) {
+  if (s_ack_chunk >= 0 && !s_ack_timer && s_ack_attempts++ < 5)
+    s_ack_timer=app_timer_register(300, retry_ack, NULL);
+}
+static void finish_calendar_sync(CalendarEvent *incoming, int total, uint32_t id) {
+  if (s_event_array) free(s_event_array);
+  s_event_array=incoming;
+  s_new_data_buffer=NULL;
+  s_total_expected_events=total;
+  s_sync_in_progress=false;
+  s_completed_sync_id=id;
+  s_active_sync_id=0;
+  s_last_sync=time(NULL);
+  persist_write_int(PERSIST_KEY_LAST_SYNC, (int)s_last_sync);
+  update_sections();
+  menu_layer_reload_data(s_menu_layer);
+  restore_selection();
+  save_data_to_storage();
+  refresh_glance();
+  layer_set_hidden(text_layer_get_layer(s_toast_layer), true);
+  if (s_settings_menu) menu_layer_reload_data(s_settings_menu);
+}
 static void inbox_handler(DictionaryIterator *iter, void *ctx) {
-  
-  Tuple *detail = dict_find(iter, MESSAGE_KEY_DETAIL_TEXT);
+  Tuple *detail=dict_find(iter, MESSAGE_KEY_DETAIL_TEXT);
   if (detail && detail->type == TUPLE_CSTRING) {
     snprintf(s_detail_meta, sizeof(s_detail_meta), "%s", detail->value->cstring);
     if (s_detail_meta_layer) {
@@ -595,95 +649,125 @@ static void inbox_handler(DictionaryIterator *iter, void *ctx) {
     }
     return;
   }
-  Tuple *status = dict_find(iter, MESSAGE_KEY_SYNC_STATUS);
-  if (status && status->type == TUPLE_CSTRING && strcmp(status->value->cstring, "error") == 0) {
-    s_sync_in_progress = false;
-    text_layer_set_text(s_toast_layer, "Sync failed");
-    layer_set_hidden(text_layer_get_layer(s_toast_layer), false);
-    menu_layer_reload_data(s_menu_layer);
+  Tuple *status=dict_find(iter, MESSAGE_KEY_SYNC_STATUS);
+  if (status && status->type == TUPLE_CSTRING) {
+    if (strcmp(status->value->cstring, "error") == 0) {
+      s_sync_in_progress=false;
+      text_layer_set_text(s_toast_layer, "Sync failed; showing cached");
+      layer_set_hidden(text_layer_get_layer(s_toast_layer), false);
+      menu_layer_reload_data(s_menu_layer);
+    }
     return;
   }
-  Tuple *font_tuple = dict_find(iter, MESSAGE_KEY_FONT_SIZE);
-  if (font_tuple && font_tuple->type == TUPLE_CSTRING) {
-    int mode = atoi(font_tuple->value->cstring);
-    if (mode >= 0 && mode <= 3) {
-      s_font_mode = mode;
-      persist_write_int(PERSIST_KEY_FONT_SIZE, mode);
+  Tuple *font=dict_find(iter, MESSAGE_KEY_FONT_SIZE);
+  if (font && font->type == TUPLE_CSTRING) {
+    int value=atoi(font->value->cstring);
+    if (value >= 0 && value <= 3) {
+      s_font_mode=value;
+      persist_write_int(PERSIST_KEY_FONT_SIZE, value);
       menu_layer_reload_data(s_menu_layer);
     }
   }
-  // 1. Check if the message contains a 12h/24h time format setting update
-  Tuple *f_t = dict_find(iter, MESSAGE_KEY_TIME_FORMAT);
-  if (f_t) { 
-    s_use_24h = (strcmp(f_t->value->cstring, "24h") == 0); // Convert the string "24h" to an integer 1
-    persist_write_int(PERSIST_KEY_TIME_24H, s_use_24h); // Save preference permanently
-    menu_layer_reload_data(s_menu_layer); // Refresh the menu to apply new time format
+  Tuple *theme=dict_find(iter, MESSAGE_KEY_THEME_MODE);
+  if (theme && theme->type == TUPLE_CSTRING) {
+    int value=atoi(theme->value->cstring);
+    if (value >= 0 && value <= 2) {
+      s_theme=value;
+      persist_write_int(PERSIST_KEY_THEME, value);
+      apply_main_theme();
+    }
   }
-
-  // 2. Check if the message contains Calendar Data
-  Tuple *t_t = dict_find(iter, MESSAGE_KEY_TOTAL_EVENTS); // Total expected events
-  Tuple *c_t = dict_find(iter, MESSAGE_KEY_CHUNK_INDEX);  // Which chunk this is
-  Tuple *d_t = dict_find(iter, MESSAGE_KEY_EVENT_DATA);   // The actual byte array of data
-
-  // Strictly validate incoming chunks before writing into watch memory.
-  if (t_t && c_t && d_t) {
-    int total = t_t->value->int32;
-    int chunk = c_t->value->int32;
-    if (total < 0 || total > MAX_EVENTS || chunk < 0 ||
-        (total > 0 && chunk >= (total + CHUNK_SIZE - 1) / CHUNK_SIZE) ||
-        d_t->type != TUPLE_BYTE_ARRAY) return;
-    int expected_count = total - chunk * CHUNK_SIZE;
-    if (expected_count > CHUNK_SIZE) expected_count = CHUNK_SIZE;
-    if (total == 0) {
-      if (chunk != 0 || d_t->length != 0) return;
-      if (s_new_data_buffer) free(s_new_data_buffer);
-      s_new_data_buffer = NULL;
-      if (s_event_array) free(s_event_array);
-      s_event_array = NULL;
-      s_total_expected_events = 0;
-      s_num_sections = 0;
-      s_sync_in_progress = false;
-      persist_write_int(PERSIST_KEY_VERSION, STORAGE_VERSION);
-      persist_write_int(PERSIST_KEY_COUNT, 0);
-      menu_layer_reload_data(s_menu_layer);
-      refresh_glance();
-      layer_set_hidden(text_layer_get_layer(s_toast_layer), true);
+  Tuple *past=dict_find(iter, MESSAGE_KEY_SHOW_PAST);
+  if (past && past->type == TUPLE_CSTRING) {
+    s_show_past=atoi(past->value->cstring)!=0;
+    persist_write_bool(PERSIST_KEY_SHOW_PAST, s_show_past);
+    update_sections();
+    menu_layer_reload_data(s_menu_layer);
+    restore_selection();
+  }
+  Tuple *bar=dict_find(iter, MESSAGE_KEY_DETAIL_STATUS_BAR);
+  if (bar && bar->type == TUPLE_CSTRING) {
+    s_show_status_bar=atoi(bar->value->cstring)!=0;
+    persist_write_bool(PERSIST_KEY_STATUS_BAR, s_show_status_bar);
+  }
+  Tuple *format=dict_find(iter, MESSAGE_KEY_TIME_FORMAT);
+  if (format && format->type == TUPLE_CSTRING) {
+    const char *val=format->value->cstring;
+    s_time_mode=strcmp(val,"24h")==0 ? 2 :
+                strcmp(val,"12h")==0 ? 1 : 0;
+    persist_write_int(PERSIST_KEY_TIME_MODE, s_time_mode);
+    menu_layer_reload_data(s_menu_layer);
+    refresh_glance();
+  }
+  Tuple *total_tuple=dict_find(iter, MESSAGE_KEY_TOTAL_EVENTS);
+  Tuple *chunk_tuple=dict_find(iter, MESSAGE_KEY_CHUNK_INDEX);
+  Tuple *id_tuple=dict_find(iter, MESSAGE_KEY_SYNC_ID);
+  Tuple *checksum_tuple=dict_find(iter, MESSAGE_KEY_SYNC_CHECKSUM);
+  Tuple *data_tuple=dict_find(iter, MESSAGE_KEY_EVENT_DATA);
+  if (!total_tuple || !chunk_tuple || !id_tuple || !checksum_tuple) return;
+  int total=total_tuple->value->int32;
+  int chunk=chunk_tuple->value->int32;
+  uint32_t id=(uint32_t)id_tuple->value->int32;
+  uint32_t expected=(uint32_t)checksum_tuple->value->int32;
+  if (!id || total<0 || total>MAX_EVENTS || chunk<0 ||
+      (total>0 && chunk >= (total+CHUNK_SIZE-1)/CHUNK_SIZE)) return;
+  if (id==s_completed_sync_id) {
+    int final_chunk=total ? (total-1)/CHUNK_SIZE : 0;
+    if (chunk==final_chunk) send_ack(id, chunk); // Lost final ACK.
+    return;
+  }
+  if (total==0) {
+    if (chunk!=0 || expected!=1) return;
+    if (s_new_data_buffer) { free(s_new_data_buffer); s_new_data_buffer=NULL; }
+    finish_calendar_sync(NULL, 0, id);
+    send_ack(id, 0);
+    return;
+  }
+  if (!data_tuple || data_tuple->type!=TUPLE_BYTE_ARRAY) return;
+  int count=total-chunk*CHUNK_SIZE;
+  if (count > CHUNK_SIZE) count=CHUNK_SIZE;
+  if (count<=0 || data_tuple->length != (size_t)(count*sizeof(CalendarEvent))) return;
+  if (chunk==0 && (s_active_sync_id!=id || !s_new_data_buffer)) {
+    if (s_new_data_buffer) free(s_new_data_buffer);
+    s_new_data_buffer=calloc(total, sizeof(CalendarEvent));
+    if (!s_new_data_buffer) return;
+    s_active_sync_id=id;
+    s_events_received_so_far=0;
+    s_next_chunk=0;
+    s_transfer_checksum=1;
+    s_expected_checksum=expected;
+    s_sync_in_progress=true;
+    text_layer_set_text(s_toast_layer, "Syncing data...");
+    layer_set_hidden(text_layer_get_layer(s_toast_layer), false);
+  }
+  if (s_active_sync_id != id || !s_new_data_buffer || s_expected_checksum != expected) return;
+  if (chunk == s_next_chunk-1) {
+    send_ack(id, chunk); // Repeated packet after ACK loss: no double copy/checksum.
+    return;
+  }
+  if (chunk != s_next_chunk) return;
+  const CalendarEvent *incoming=(const CalendarEvent*)data_tuple->value->data;
+  for (int i=0;i<count;i++) {
+    if (!memchr(incoming[i].title, '\0', MAX_TITLE_LEN)) return;
+  }
+  memcpy(&s_new_data_buffer[chunk*CHUNK_SIZE], data_tuple->value->data, data_tuple->length);
+  s_transfer_checksum=checksum_bytes(s_transfer_checksum, data_tuple->value->data, data_tuple->length);
+  s_events_received_so_far+=count;
+  s_next_chunk++;
+  if (s_events_received_so_far == total) {
+    if (s_transfer_checksum != s_expected_checksum) {
+      APP_LOG(APP_LOG_LEVEL_WARNING, "Calendar checksum mismatch; retaining cached events");
+      free(s_new_data_buffer);
+      s_new_data_buffer=NULL;
+      s_active_sync_id=0;
+      s_sync_in_progress=false;
+      text_layer_set_text(s_toast_layer, "Sync integrity error");
+      layer_set_hidden(text_layer_get_layer(s_toast_layer), false);
       return;
     }
-    if (expected_count <= 0 ||
-        d_t->length != expected_count * sizeof(CalendarEvent)) return;
-    if (chunk == 0) {
-      if (s_new_data_buffer) free(s_new_data_buffer);
-      s_new_data_buffer = calloc(total, sizeof(CalendarEvent));
-      s_events_received_so_far = 0;
-      s_next_chunk = 0;
-      s_sync_in_progress = (s_new_data_buffer != NULL);
-      text_layer_set_text(s_toast_layer, "Syncing data...");
-      layer_set_hidden(text_layer_get_layer(s_toast_layer), !s_sync_in_progress);
-    }
-    if (!s_sync_in_progress || chunk != s_next_chunk) return;
-    const CalendarEvent *incoming = (const CalendarEvent *)d_t->value->data;
-    for (int i = 0; i < expected_count; i++) {
-      if (!memchr(incoming[i].title, 0, MAX_TITLE_LEN)) return;
-    }
-    memcpy(&s_new_data_buffer[chunk * CHUNK_SIZE],
-           d_t->value->data, d_t->length);
-    s_events_received_so_far += expected_count;
-    s_next_chunk++;
-    if (s_events_received_so_far == total) {
-      if (s_event_array) free(s_event_array);
-      s_event_array = s_new_data_buffer;
-      s_new_data_buffer = NULL;
-      s_total_expected_events = total;
-      s_sync_in_progress = false;
-      update_sections();
-      menu_layer_reload_data(s_menu_layer);
-      restore_selection();
-      save_data_to_storage();
-      refresh_glance();
-      layer_set_hidden(text_layer_get_layer(s_toast_layer), true);
-    }
+    finish_calendar_sync(s_new_data_buffer, total, id);
   }
+  send_ack(id, chunk);
 }
 
 // --- Main App Lifecycle ---
@@ -769,6 +853,7 @@ static void init() {
   tick_timer_service_subscribe(MINUTE_UNIT, minute_tick);
   // Register the function to listen for Bluetooth messages
   app_message_register_inbox_received(inbox_handler);
+  app_message_register_outbox_failed(ack_outbox_failed);
   // Open the Bluetooth channels (Input buffer: 2048 bytes, Output buffer: 512 bytes)
   app_message_open(512, 128);
 
@@ -776,10 +861,7 @@ static void init() {
   if (s_total_expected_events == 0) {
     s_sync_in_progress = true;
     layer_set_hidden(text_layer_get_layer(s_toast_layer), false); // Show the "Syncing" toast immediately
-    DictionaryIterator *out;
-    app_message_outbox_begin(&out); // Start an outgoing message
-    dict_write_uint8(out, 0, 1); // Write a dummy byte to act as a signal ping
-    app_message_outbox_send(); // Send the message to the phone
+    request_calendar_sync();
   }
 }
 
