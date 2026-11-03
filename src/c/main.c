@@ -12,7 +12,12 @@
 #define PERSIST_KEY_SELECTION 98
 #define PERSIST_KEY_FONT_SIZE 97
 // Define the maximum number of distinct day groups (e.g., Today, Tomorrow)
-#define MAX_SECTIONS 10
+#define MAX_SECTIONS 16
+#define PERSIST_KEY_THEME 94
+#define PERSIST_KEY_SHOW_PAST 95
+#define PERSIST_KEY_STATUS_BAR 96
+#define PERSIST_KEY_TIME_MODE 93
+#define PERSIST_KEY_LAST_SYNC 92
 // Define the storage key used to save the total number of events
 #define PERSIST_KEY_COUNT 100
 // Define the storage key used to save the user's 12h/24h time format preference
@@ -39,7 +44,10 @@ typedef struct {
 // --- Global UI Variables ---
 static Window *s_main_window;           // The main application window
 static Window *s_detail_window = NULL;  // The window that pops up to show event details
-static MenuLayer *s_menu_layer;         // The scrolling list layer for the main window
+static MenuLayer *s_menu_layer;
+static Window *s_settings_window;
+static MenuLayer *s_settings_menu;
+static StatusBarLayer *s_detail_status_bar;         // The scrolling list layer for the main window
 static ScrollLayer *s_detail_scroll_layer;
 static TextLayer *s_detail_title_layer; // The text layer showing the event title in the detail window
 static TextLayer *s_detail_time_layer;
@@ -61,7 +69,15 @@ static PreferredContentSize s_content_size = PreferredContentSizeMedium;
 static int s_font_mode = 0; // 0=System, 1=Small, 2=Medium, 3=Large
           // The index of the event the user clicked on
 static int s_use_24h = 0;                       // Flag: 0 for 12-hour AM/PM format, 1 for 24-hour format
-static CalendarSection s_sections[MAX_SECTIONS];// Array holding the grouping data for the Menu headers
+static CalendarSection s_sections[MAX_SECTIONS];
+static int s_visible_indices[MAX_EVENTS];
+static int s_visible_count = 0;
+static int s_theme = 0; // 0=Auto day/night, 1=Light, 2=Dark
+static bool s_show_past = false;
+static bool s_show_status_bar = false;
+static int s_time_mode = 0; // 0=System, 1=12h, 2=24h
+static time_t s_last_sync = 0;
+static uint32_t s_active_sync_id = 0, s_completed_sync_id = 0;// Array holding the grouping data for the Menu headers
 
 // --- Helper Functions ---
 // Muted source markers; monochrome watches use black bars.
@@ -106,44 +122,49 @@ static bool is_same_day(time_t t1, time_t t2) {
 }
 
 // Organizes the linear list of events into groups based on their calendar day
-static void update_sections() {
-  if (s_total_expected_events == 0 || !s_event_array) { s_num_sections = 0; return; } // If there is no data, exit the function
-  
-  s_num_sections = 0; // Reset the section count to zero
-  int current_start = 0; // Track the array index where the current day group begins
-  time_t now = time(NULL); // Get the current time on the watch
+// The stored event array is immutable during rendering. A visible-index map
+// filters completed events without losing data or disturbing detail lookup IDs.
+static void update_sections(void) {
+  s_num_sections = 0;
+  s_visible_count = 0;
+  if (!s_event_array || s_total_expected_events <= 0) return;
+  time_t now = time(NULL);
   struct tm tomorrow_tm = *localtime(&now);
   tomorrow_tm.tm_mday += 1;
   tomorrow_tm.tm_isdst = -1;
   time_t tomorrow = mktime(&tomorrow_tm);
-  
-  for (int i = 0; i < s_total_expected_events; i++) { // Loop through every event
-    time_t et = (time_t)s_event_array[i].timestamp; // Get the timestamp for the current event
-    
-    // If this is the first event, OR if this event is on a different day than the previous event
-    if (i == 0 || !is_same_day((time_t)s_event_array[i-1].timestamp, et)) {
-      if (s_num_sections > 0) { // If we were already building a section...
-        s_sections[s_num_sections - 1].count = i - current_start; // ...close it by calculating how many events it contained
-      }
-      if (s_num_sections < MAX_SECTIONS) { // Make sure we don't exceed our maximum allowed sections
-        s_sections[s_num_sections].start_index = i; // Mark this event as the start of a new section
-        
-        // Determine the header text: "Today", "Tomorrow", or the full date
-        strftime(s_sections[s_num_sections].date_text, 32, 
-                 is_same_day(now, et) ? "Today" : 
-                 is_same_day(tomorrow, et) ? "Tomorrow" : "%A, %b %d", 
-                 localtime(&et));
-                 
-        current_start = i; // Update the tracking variable to the current index
-        s_num_sections++; // Increment the total number of sections
-      }
+  for (int i = 0; i < s_total_expected_events && s_visible_count < MAX_EVENTS; i++) {
+    CalendarEvent *event = &s_event_array[i];
+    if (!s_show_past && (time_t)event->end_timestamp < now) continue;
+    time_t date = (time_t)event->timestamp;
+    bool new_day = s_num_sections == 0;
+    if (!new_day) {
+      int previous = s_visible_indices[s_visible_count - 1];
+      new_day = !is_same_day((time_t)s_event_array[previous].timestamp, date);
     }
-  }
-  // After the loop, close the final section by calculating its count
-  if (s_num_sections > 0) {
-    s_sections[s_num_sections - 1].count = s_total_expected_events - current_start;
+    if (new_day) {
+      if (s_num_sections >= MAX_SECTIONS) break;
+      CalendarSection *section = &s_sections[s_num_sections++];
+      section->start_index = s_visible_count;
+      section->count = 0;
+      strftime(section->date_text, sizeof(section->date_text),
+        is_same_day(now, date) ? "Today" :
+        is_same_day(tomorrow, date) ? "Tomorrow" : "%a, %b %d",
+        localtime(&date));
+    }
+    s_visible_indices[s_visible_count++] = i;
+    s_sections[s_num_sections - 1].count++;
   }
 }
+static bool dark_mode(void) {
+  if (s_theme == 1) return false;
+  if (s_theme == 2) return true;
+  time_t now = time(NULL);
+  struct tm *t = localtime(&now);
+  return t && (t->tm_hour < 7 || t->tm_hour >= 19);
+}
+static GColor ui_background(void) { return dark_mode() ? GColorBlack : GColorWhite; }
+static GColor ui_foreground(void) { return dark_mode() ? GColorWhite : GColorBlack; }
 
 static int effective_font_mode(void) {
   if (s_font_mode >= 1 && s_font_mode <= 3) return s_font_mode;
@@ -173,12 +194,11 @@ static void restore_selection(void) {
   if (index >= s_total_expected_events) index = s_total_expected_events - 1;
   if (index < 0) index = 0;
   for (int section = 0; section < s_num_sections; section++) {
-    if (index >= s_sections[section].start_index &&
-        index < s_sections[section].start_index + s_sections[section].count) {
-      menu_layer_set_selected_index(s_menu_layer,
-          (MenuIndex){.section=section,.row=index-s_sections[section].start_index},
-          MenuRowAlignCenter, false);
-      return;
+    for (int row = 0; row < s_sections[section].count; row++) {
+      if (s_visible_indices[s_sections[section].start_index + row] == index) {
+        menu_layer_set_selected_index(s_menu_layer, (MenuIndex){.section=section,.row=row}, MenuRowAlignCenter, false);
+        return;
+      }
     }
   }
 }
