@@ -85,7 +85,8 @@ static int s_ack_chunk = -1;
 static uint32_t s_ack_id = 0;
 static int s_ack_attempts = 0;
 static AppTimer *s_ack_timer = NULL;
-static AppTimer *s_sync_watchdog = NULL;// Array holding the grouping data for the Menu headers
+static AppTimer *s_sync_watchdog = NULL;
+static AppTimer *s_pref_timer = NULL;// Array holding the grouping data for the Menu headers
 
 // --- Helper Functions ---
 // Muted source markers; monochrome watches use black bars.
@@ -566,6 +567,14 @@ static void send_watch_preferences(void) {
     s_time_mode==1 ? "12h" : s_time_mode==2 ? "24h" : "System");
   app_message_outbox_send();
 }
+static void pending_pref_sync(void *context) {
+  s_pref_timer=NULL;
+  send_watch_preferences();
+}
+static void schedule_pref_sync(void) {
+  if (s_pref_timer) app_timer_cancel(s_pref_timer);
+  s_pref_timer=app_timer_register(500,pending_pref_sync,NULL);
+}
 static void settings_select(MenuLayer *menu, MenuIndex *index, void *data) {
   switch (index->row) {
     case SETTING_SYNC:
@@ -602,7 +611,7 @@ static void settings_select(MenuLayer *menu, MenuIndex *index, void *data) {
     default: break;
   }
   if (index->row != SETTING_SYNC && index->row != SETTING_LAST_SYNC)
-    send_watch_preferences();
+    schedule_pref_sync();
   if (s_settings_menu) menu_layer_reload_data(s_settings_menu);
 }
 static void settings_load(Window *window) {
@@ -923,7 +932,8 @@ static void init() {
 static void deinit() {
   tick_timer_service_unsubscribe();
   if (s_ack_timer) app_timer_cancel(s_ack_timer);
-  if (s_detail_timeout) app_timer_cancel(s_detail_timeout);
+  if (s_detail_timeout) { app_timer_cancel(s_detail_timeout); s_detail_timeout=NULL; }
+  if (s_pref_timer) { app_timer_cancel(s_pref_timer); s_pref_timer=NULL; }
   if (s_sync_watchdog) app_timer_cancel(s_sync_watchdog);
   if (s_settings_window) window_destroy(s_settings_window);
   if (s_detail_window) window_destroy(s_detail_window);
