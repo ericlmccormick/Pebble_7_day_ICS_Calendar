@@ -101,7 +101,7 @@ static GColor event_color(uint8_t color) {
 // Formats a Unix timestamp into a human-readable time string (12h or 24h)
 static void format_time(char *buffer, int buf_size, time_t timestamp) {
   struct tm *t = localtime(&timestamp); // Convert the Unix timestamp to a local time structure
-  if (s_use_24h == 1) { // If the user prefers 24-hour time
+  if (s_time_mode == 2 || (s_time_mode == 0 && clock_is_24h_style())) { // System or explicit 24-hour
     strftime(buffer, buf_size, "%H:%M", t); // Format as HH:MM (e.g., 14:30)
   } else { // If the user prefers 12-hour time
     int hour = t->tm_hour; // Extract the hour (0-23)
@@ -298,32 +298,37 @@ static void layout_detail_content(void) {
     y += height + (i == 0 ? 12 : 10);
   }
   y += PBL_IF_ROUND_ELSE(22, 12);
-  if (y < bounds.size.h) y = bounds.size.h;
+  if (y < bounds.size.h - (s_show_status_bar ? 16 : 0)) y = bounds.size.h - (s_show_status_bar ? 16 : 0);
   scroll_layer_set_content_size(s_detail_scroll_layer, GSize(bounds.size.w, y));
 }
 static void detail_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   GRect bounds = layer_get_bounds(root);
-  window_set_background_color(window, GColorWhite);
-  s_detail_scroll_layer = scroll_layer_create(bounds);
+  window_set_background_color(window, ui_background());
+  s_detail_scroll_layer = scroll_layer_create(GRect(0, s_show_status_bar ? 16 : 0, bounds.size.w, bounds.size.h - (s_show_status_bar ? 16 : 0)));
+  if (s_show_status_bar) {
+    s_detail_status_bar = status_bar_layer_create();
+    status_bar_layer_set_colors(s_detail_status_bar, ui_background(), ui_foreground());
+    layer_add_child(root, status_bar_layer_get_layer(s_detail_status_bar));
+  }
   scroll_layer_set_click_config_onto_window(s_detail_scroll_layer, window);
   layer_add_child(root, scroll_layer_get_layer(s_detail_scroll_layer));
   const int font = effective_font_mode();
   s_detail_time_layer = text_layer_create(GRect(0, 0, bounds.size.w, 48));
   text_layer_set_font(s_detail_time_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
-  text_layer_set_text_color(s_detail_time_layer, GColorBlack);
+  text_layer_set_text_color(s_detail_time_layer, ui_foreground());
   text_layer_set_background_color(s_detail_time_layer, GColorClear);
   scroll_layer_add_child(s_detail_scroll_layer, text_layer_get_layer(s_detail_time_layer));
   s_detail_title_layer = text_layer_create(GRect(0, 0, bounds.size.w, 48));
   text_layer_set_font(s_detail_title_layer, fonts_get_system_font(
     font == 3 ? FONT_KEY_GOTHIC_28_BOLD : FONT_KEY_GOTHIC_24_BOLD));
-  text_layer_set_text_color(s_detail_title_layer, GColorBlack);
+  text_layer_set_text_color(s_detail_title_layer, ui_foreground());
   text_layer_set_background_color(s_detail_title_layer, GColorClear);
   scroll_layer_add_child(s_detail_scroll_layer, text_layer_get_layer(s_detail_title_layer));
   s_detail_meta_layer = text_layer_create(GRect(0, 0, bounds.size.w, 48));
   text_layer_set_font(s_detail_meta_layer, fonts_get_system_font(
     font == 1 ? FONT_KEY_GOTHIC_18 : (font == 3 ? FONT_KEY_GOTHIC_28 : FONT_KEY_GOTHIC_24)));
-  text_layer_set_text_color(s_detail_meta_layer, GColorBlack);
+  text_layer_set_text_color(s_detail_meta_layer, ui_foreground());
   text_layer_set_background_color(s_detail_meta_layer, GColorClear);
   text_layer_set_text(s_detail_meta_layer, s_detail_meta);
   scroll_layer_add_child(s_detail_scroll_layer, text_layer_get_layer(s_detail_meta_layer));
@@ -346,6 +351,7 @@ static void detail_unload(Window *window) {
   text_layer_destroy(s_detail_meta_layer);
   s_detail_meta_layer = NULL;
   scroll_layer_destroy(s_detail_scroll_layer);
+  if (s_detail_status_bar) { status_bar_layer_destroy(s_detail_status_bar); s_detail_status_bar = NULL; }
 }
 
 // Opens the detail window for a specific event index
@@ -407,15 +413,14 @@ static void draw_row_callback(GContext* ctx, const Layer *l, MenuIndex *i, void 
   }
   
   // Calculate which event this row corresponds to
-  CalendarEvent ev = s_event_array[s_sections[i->section].start_index + i->row];
+  CalendarEvent ev = s_event_array[s_visible_indices[s_sections[i->section].start_index + i->row]];
   graphics_context_set_fill_color(ctx, event_color(ev.color));
   graphics_fill_rect(ctx, GRect(0, 3, 4, row_height() - 6), 0, GCornerNone);
   static char t_b[16]; 
   format_time(t_b, 16, ev.timestamp); // Format the start time
   
-  MenuIndex selected = menu_layer_get_selected_index(s_menu_layer);
-  bool highlighted = selected.section == i->section && selected.row == i->row;
-  graphics_context_set_text_color(ctx, highlighted ? PBL_IF_COLOR_ELSE(GColorBlack, GColorWhite) : GColorBlack); // Keep highlighted text readable
+  bool highlighted = menu_cell_layer_is_highlighted(l);
+  graphics_context_set_text_color(ctx, highlighted ? ui_background() : ui_foreground()); // Keep highlighted text readable
   // Draw the time text in the top half of the row
   graphics_draw_text(ctx, t_b, fonts_get_system_font(time_font()), GRect(9, 0, layer_get_bounds(l).size.w - 14, 20), 0, GTextAlignmentLeft, NULL);
   // Respect the user's system text size.
@@ -425,9 +430,9 @@ static void draw_row_callback(GContext* ctx, const Layer *l, MenuIndex *i, void 
 // Handles what happens when the user clicks the "Select" (middle) button on a row
 static void select_click_callback(MenuLayer *m, MenuIndex *i, void *d) { 
   if(s_num_sections > 0) { // If actual data exists
-    s_restore_event_index = s_sections[i->section].start_index + i->row;
+    s_restore_event_index = s_visible_indices[s_sections[i->section].start_index + i->row];
     persist_write_int(PERSIST_KEY_SELECTION, s_restore_event_index);
-    show_detail(s_sections[i->section].start_index + i->row); // Open the detail window for that specific event
+    show_detail(s_visible_indices[s_sections[i->section].start_index + i->row]); // Open the detail window for that specific event
   }
 }
 
@@ -558,8 +563,9 @@ static void main_load(Window *window) {
   
   // Create and configure the MenuLayer (The scrolling list)
   s_menu_layer = menu_layer_create(bounds);
-  menu_layer_set_normal_colors(s_menu_layer, GColorWhite, GColorBlack); // White background, Black text
-  menu_layer_set_highlight_colors(s_menu_layer, PBL_IF_COLOR_ELSE(GColorCyan, GColorBlack), PBL_IF_COLOR_ELSE(GColorBlack, GColorWhite)); // Cyan highlight, Black text
+  window_set_background_color(window, ui_background());
+  menu_layer_set_normal_colors(s_menu_layer, ui_background(), ui_foreground()); // White background, Black text
+  menu_layer_set_highlight_colors(s_menu_layer, dark_mode() ? GColorWhite : PBL_IF_COLOR_ELSE(GColorCyan, GColorBlack), dark_mode() ? GColorBlack : PBL_IF_COLOR_ELSE(GColorBlack, GColorWhite)); // Cyan highlight, Black text
 
   // Register all the drawing/logic callbacks for the MenuLayer
   menu_layer_set_callbacks(s_menu_layer, NULL, (MenuLayerCallbacks){
@@ -612,8 +618,14 @@ static void init() {
     if (saved >= 0 && saved <= 3) s_font_mode = saved;
   }
   if (persist_exists(PERSIST_KEY_SELECTION)) s_restore_event_index = persist_read_int(PERSIST_KEY_SELECTION);
+  if (persist_exists(PERSIST_KEY_THEME)) s_theme = persist_read_int(PERSIST_KEY_THEME);
+  if (persist_exists(PERSIST_KEY_SHOW_PAST)) s_show_past = persist_read_bool(PERSIST_KEY_SHOW_PAST);
+  if (persist_exists(PERSIST_KEY_STATUS_BAR)) s_show_status_bar = persist_read_bool(PERSIST_KEY_STATUS_BAR);
+  if (persist_exists(PERSIST_KEY_TIME_MODE)) s_time_mode = persist_read_int(PERSIST_KEY_TIME_MODE);
+  else if (persist_exists(PERSIST_KEY_TIME_24H)) s_time_mode = persist_read_int(PERSIST_KEY_TIME_24H) ? 2 : 1;
+  if (persist_exists(PERSIST_KEY_LAST_SYNC)) s_last_sync = (time_t)persist_read_int(PERSIST_KEY_LAST_SYNC);
   // Load user preference for 12/24 hour time
-  if (persist_exists(PERSIST_KEY_TIME_24H)) s_use_24h = persist_read_int(PERSIST_KEY_TIME_24H);
+  // Clock preferences are now controlled through s_time_mode.
   
   // Load cached calendar data from permanent storage
   if (persist_exists(PERSIST_KEY_COUNT)) load_data_from_storage();
