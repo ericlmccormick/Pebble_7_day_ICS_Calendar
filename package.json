@@ -33,7 +33,8 @@
       "WATCH_PREFS",
       "THEME_MODE",
       "SHOW_PAST",
-      "DETAIL_STATUS_BAR"
+      "DETAIL_STATUS_BAR",
+      "DETAIL_TOKEN"
     ],
     "projectType": "native",
     "resources": {
