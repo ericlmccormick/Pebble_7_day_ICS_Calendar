@@ -468,11 +468,11 @@ static void apply_main_theme(void) {
     menu_layer_reload_data(s_settings_menu);
   }
 }
-static void request_calendar_sync(void) {
+static void request_calendar_sync(bool force) {
   DictionaryIterator *out = NULL;
   AppMessageResult result = app_message_outbox_begin(&out);
   if (result == APP_MSG_OK && out) {
-    dict_write_cstring(out, MESSAGE_KEY_SYNC_COMMAND, "refresh");
+    dict_write_cstring(out, MESSAGE_KEY_SYNC_COMMAND, force ? "refresh" : "sync");
     result = app_message_outbox_send();
   }
   if (result == APP_MSG_OK) {
@@ -520,10 +520,28 @@ static void settings_draw(GContext *ctx, const Layer *layer, MenuIndex *index, v
   }
   menu_cell_basic_draw(ctx, layer, title, subtitle, NULL);
 }
+// Keep phone configuration in step with preferences changed directly on-watch.
+static void send_watch_preferences(void) {
+  DictionaryIterator *out=NULL;
+  if (app_message_outbox_begin(&out) != APP_MSG_OK || !out) return;
+  char theme[4], font[4], past[4], bar[4];
+  snprintf(theme,sizeof(theme),"%d",s_theme);
+  snprintf(font,sizeof(font),"%d",s_font_mode);
+  snprintf(past,sizeof(past),"%d",s_show_past?1:0);
+  snprintf(bar,sizeof(bar),"%d",s_show_status_bar?1:0);
+  dict_write_uint8(out, MESSAGE_KEY_WATCH_PREFS, 1);
+  dict_write_cstring(out, MESSAGE_KEY_THEME_MODE, theme);
+  dict_write_cstring(out, MESSAGE_KEY_FONT_SIZE, font);
+  dict_write_cstring(out, MESSAGE_KEY_SHOW_PAST, past);
+  dict_write_cstring(out, MESSAGE_KEY_DETAIL_STATUS_BAR, bar);
+  dict_write_cstring(out, MESSAGE_KEY_TIME_FORMAT,
+    s_time_mode==1 ? "12h" : s_time_mode==2 ? "24h" : "System");
+  app_message_outbox_send();
+}
 static void settings_select(MenuLayer *menu, MenuIndex *index, void *data) {
   switch (index->row) {
     case SETTING_SYNC:
-      request_calendar_sync();
+      request_calendar_sync(true);
       window_stack_pop(true);
       break;
     case SETTING_THEME:
@@ -555,6 +573,8 @@ static void settings_select(MenuLayer *menu, MenuIndex *index, void *data) {
       break;
     default: break;
   }
+  if (index->row != SETTING_SYNC && index->row != SETTING_LAST_SYNC)
+    send_watch_preferences();
   if (s_settings_menu) menu_layer_reload_data(s_settings_menu);
 }
 static void settings_load(Window *window) {
@@ -861,7 +881,7 @@ static void init() {
   if (s_total_expected_events == 0) {
     s_sync_in_progress = true;
     layer_set_hidden(text_layer_get_layer(s_toast_layer), false); // Show the "Syncing" toast immediately
-    request_calendar_sync();
+    request_calendar_sync(false);
   }
 }
 
