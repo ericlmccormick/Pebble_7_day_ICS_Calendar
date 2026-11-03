@@ -18,6 +18,7 @@ var syncBusy = false;
 var activeTransfer = null;
 var transferSequence = 0;
 var detailCacheRestored = false;
+var lastWatchTransferAt = 0;
 // Duplicate sync triggers during an active fetch are ignored.
 // Pebble 'ready' and the watch's initial sync ping often overlap.
 // How many bytes a single CalendarEvent struct takes up in C (8 bytes for time + 56 bytes for title = 64)
@@ -188,6 +189,8 @@ function fetchIcal() {
           latestEvents=selected;
           localStorage.setItem('last_fetch_time', Date.now().toString());
           persistDetailCache(selected);
+          detailCacheRestored=true;
+          lastWatchTransferAt=Date.now();
         }
         finishSync(success);
       });
@@ -386,7 +389,7 @@ Pebble.addEventListener('appmessage', function(e) {
   if (payload.DETAIL_REQUEST !== undefined) {
     var index = Number(payload.DETAIL_REQUEST);
     var message = detailText(latestEvents[index]);
-    Pebble.sendAppMessage({DETAIL_TEXT: message}, function(){},
+    Pebble.sendAppMessage({DETAIL_TEXT: message, DETAIL_TOKEN: Number(payload.DETAIL_TOKEN) || 0}, function(){},
       function(){ console.log('JS: Details not delivered to watch'); });
     return;
   }
@@ -413,9 +416,11 @@ Pebble.addEventListener('appmessage', function(e) {
       return;
     }
     if (cacheIsFresh() && detailCacheRestored) {
+      if (Date.now()-lastWatchTransferAt < 10000) return; // Already delivered recently.
       console.log('JS: Restoring watch from fresh phone cache');
       sendEventByteArray(latestEvents,0,function(ok) {
         if (!ok) console.log('JS: Cached event transfer failed');
+        else lastWatchTransferAt=Date.now();
       });
     } else fetchIcal();
   }
