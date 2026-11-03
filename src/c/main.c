@@ -438,15 +438,147 @@ static void select_click_callback(MenuLayer *m, MenuIndex *i, void *d) {
 
 // Handles what happens when the user LONG-PRESSES the "Select" (middle) button on a row
 static void select_long_click_callback(MenuLayer *m, MenuIndex *i, void *d) {
-  // 1. Immediately unhide the "Syncing..." toast so the user knows it worked
-  layer_set_hidden(text_layer_get_layer(s_toast_layer), false); 
-  
-  // 2. Send the "Help Signal" to the phone. 
-  // (The JS is programmed to ignore the 30-min timer whenever it receives this)
-  DictionaryIterator *out;
-  app_message_outbox_begin(&out); // Start an outgoing message
-  dict_write_uint8(out, 0, 1); // Write a dummy byte just to trigger the listener
-  app_message_outbox_send(); // Send the message to the phone
+  open_settings();
+}
+
+// --- Watch-side settings; no phone connection is needed to change UI options. ---
+enum { SETTING_SYNC, SETTING_THEME, SETTING_FONT, SETTING_PAST,
+       SETTING_TIME, SETTING_STATUS_BAR, SETTING_LAST_SYNC, SETTINGS_COUNT };
+
+static void apply_main_theme(void) {
+  if (!s_main_window || !s_menu_layer) return;
+  window_set_background_color(s_main_window, ui_background());
+  menu_layer_set_normal_colors(s_menu_layer, ui_background(), ui_foreground());
+  menu_layer_set_highlight_colors(s_menu_layer,
+    dark_mode() ? GColorWhite : PBL_IF_COLOR_ELSE(GColorCyan, GColorBlack),
+    dark_mode() ? GColorBlack : PBL_IF_COLOR_ELSE(GColorBlack, GColorWhite));
+  menu_layer_reload_data(s_menu_layer);
+  if (s_settings_menu) {
+    window_set_background_color(s_settings_window, ui_background());
+    menu_layer_set_normal_colors(s_settings_menu, ui_background(), ui_foreground());
+    menu_layer_set_highlight_colors(s_settings_menu,
+      dark_mode() ? GColorWhite : PBL_IF_COLOR_ELSE(GColorCyan, GColorBlack),
+      dark_mode() ? GColorBlack : PBL_IF_COLOR_ELSE(GColorBlack, GColorWhite));
+    menu_layer_reload_data(s_settings_menu);
+  }
+}
+static void request_calendar_sync(void) {
+  DictionaryIterator *out = NULL;
+  AppMessageResult result = app_message_outbox_begin(&out);
+  if (result == APP_MSG_OK && out) {
+    dict_write_cstring(out, MESSAGE_KEY_SYNC_COMMAND, "refresh");
+    result = app_message_outbox_send();
+  }
+  if (result == APP_MSG_OK) {
+    s_sync_in_progress = true;
+    text_layer_set_text(s_toast_layer, "Syncing data...");
+    layer_set_hidden(text_layer_get_layer(s_toast_layer), false);
+  } else {
+    text_layer_set_text(s_toast_layer, "Phone unavailable");
+    layer_set_hidden(text_layer_get_layer(s_toast_layer), false);
+  }
+}
+static uint16_t settings_rows(MenuLayer *menu, uint16_t section, void *data) {
+  return SETTINGS_COUNT;
+}
+static void settings_draw(GContext *ctx, const Layer *layer, MenuIndex *index, void *data) {
+  static char last[40];
+  const char *title = "", *subtitle = "";
+  switch (index->row) {
+    case SETTING_SYNC: title="Force Sync"; subtitle="Fetch calendar now"; break;
+    case SETTING_THEME:
+      title="Appearance";
+      subtitle=s_theme==1 ? "Light" : s_theme==2 ? "Dark" : "Auto (day/night)";
+      break;
+    case SETTING_FONT:
+      title="Font Size";
+      subtitle=s_font_mode==1 ? "Small" : s_font_mode==2 ? "Medium" :
+               s_font_mode==3 ? "Large" : "System";
+      break;
+    case SETTING_PAST:
+      title="Past Events"; subtitle=s_show_past ? "Show" : "Hide"; break;
+    case SETTING_TIME:
+      title="Time Format";
+      subtitle=s_time_mode==1 ? "12 hour" : s_time_mode==2 ? "24 hour" : "System";
+      break;
+    case SETTING_STATUS_BAR:
+      title="Detail Status Bar"; subtitle=s_show_status_bar ? "On" : "Off"; break;
+    case SETTING_LAST_SYNC:
+      title="Last Updated";
+      if (!s_last_sync) subtitle="Not yet synced";
+      else {
+        strftime(last, sizeof(last), "%a %b %d %H:%M", localtime(&s_last_sync));
+        subtitle=last;
+      }
+      break;
+  }
+  menu_cell_basic_draw(ctx, layer, title, subtitle, NULL);
+}
+static void settings_select(MenuLayer *menu, MenuIndex *index, void *data) {
+  switch (index->row) {
+    case SETTING_SYNC:
+      request_calendar_sync();
+      window_stack_pop(true);
+      break;
+    case SETTING_THEME:
+      s_theme = (s_theme + 1) % 3;
+      persist_write_int(PERSIST_KEY_THEME, s_theme);
+      apply_main_theme();
+      break;
+    case SETTING_FONT:
+      s_font_mode = (s_font_mode + 1) % 4;
+      persist_write_int(PERSIST_KEY_FONT_SIZE, s_font_mode);
+      menu_layer_reload_data(s_menu_layer);
+      break;
+    case SETTING_PAST:
+      s_show_past = !s_show_past;
+      persist_write_bool(PERSIST_KEY_SHOW_PAST, s_show_past);
+      update_sections();
+      menu_layer_reload_data(s_menu_layer);
+      restore_selection();
+      break;
+    case SETTING_TIME:
+      s_time_mode = (s_time_mode + 1) % 3;
+      persist_write_int(PERSIST_KEY_TIME_MODE, s_time_mode);
+      menu_layer_reload_data(s_menu_layer);
+      refresh_glance();
+      break;
+    case SETTING_STATUS_BAR:
+      s_show_status_bar = !s_show_status_bar;
+      persist_write_bool(PERSIST_KEY_STATUS_BAR, s_show_status_bar);
+      break;
+    default: break;
+  }
+  if (s_settings_menu) menu_layer_reload_data(s_settings_menu);
+}
+static void settings_load(Window *window) {
+  Layer *root=window_get_root_layer(window);
+  s_settings_menu=menu_layer_create(layer_get_bounds(root));
+  menu_layer_set_callbacks(s_settings_menu, NULL, (MenuLayerCallbacks){
+    .get_num_rows=settings_rows, .draw_row=settings_draw,
+    .select_click=settings_select
+  });
+  menu_layer_set_click_config_onto_window(s_settings_menu, window);
+  layer_add_child(root, menu_layer_get_layer(s_settings_menu));
+  apply_main_theme();
+}
+static void settings_unload(Window *window) {
+  menu_layer_destroy(s_settings_menu);
+  s_settings_menu=NULL;
+}
+static void open_settings(void) {
+  if (!s_settings_window) {
+    s_settings_window=window_create();
+    window_set_window_handlers(s_settings_window, (WindowHandlers){
+      .load=settings_load, .unload=settings_unload
+    });
+  }
+  window_stack_push(s_settings_window, true);
+}
+static void minute_tick(struct tm *tick_time, TimeUnits changed) {
+  if (!s_main_window || !s_menu_layer) return;
+  update_sections();
+  apply_main_theme();
 }
 
 // --- Communications ---
@@ -634,6 +766,7 @@ static void init() {
   window_stack_push(s_main_window, true);
   restore_selection();
   
+  tick_timer_service_subscribe(MINUTE_UNIT, minute_tick);
   // Register the function to listen for Bluetooth messages
   app_message_register_inbox_received(inbox_handler);
   // Open the Bluetooth channels (Input buffer: 2048 bytes, Output buffer: 512 bytes)
