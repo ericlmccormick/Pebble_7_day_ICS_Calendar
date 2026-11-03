@@ -443,7 +443,8 @@ static void draw_row_callback(GContext* ctx, const Layer *l, MenuIndex *i, void 
   format_time(t_b, 16, ev.timestamp); // Format the start time
   
   bool highlighted = menu_cell_layer_is_highlighted(l);
-  graphics_context_set_text_color(ctx, highlighted ? ui_background() : ui_foreground()); // Keep highlighted text readable
+  GColor selected_text = dark_mode() ? GColorBlack : PBL_IF_COLOR_ELSE(GColorBlack, GColorWhite);
+  graphics_context_set_text_color(ctx, highlighted ? selected_text : ui_foreground()); // Keep highlighted text readable
   // Draw the time text in the top half of the row
   graphics_draw_text(ctx, t_b, fonts_get_system_font(time_font()), GRect(9, 0, layer_get_bounds(l).size.w - 14, 20), 0, GTextAlignmentLeft, NULL);
   // Respect the user's system text size.
