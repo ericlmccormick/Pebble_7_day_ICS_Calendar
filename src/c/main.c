@@ -12,7 +12,12 @@
 #define PERSIST_KEY_SELECTION 98
 #define PERSIST_KEY_FONT_SIZE 97
 // Define the maximum number of distinct day groups (e.g., Today, Tomorrow)
-#define MAX_SECTIONS 10
+#define MAX_SECTIONS 16
+#define PERSIST_KEY_THEME 94
+#define PERSIST_KEY_SHOW_PAST 95
+#define PERSIST_KEY_STATUS_BAR 96
+#define PERSIST_KEY_TIME_MODE 93
+#define PERSIST_KEY_LAST_SYNC 92
 // Define the storage key used to save the total number of events
 #define PERSIST_KEY_COUNT 100
 // Define the storage key used to save the user's 12h/24h time format preference
@@ -39,12 +44,18 @@ typedef struct {
 // --- Global UI Variables ---
 static Window *s_main_window;           // The main application window
 static Window *s_detail_window = NULL;  // The window that pops up to show event details
-static MenuLayer *s_menu_layer;         // The scrolling list layer for the main window
+static MenuLayer *s_menu_layer;
+static Window *s_settings_window;
+static MenuLayer *s_settings_menu;
+static StatusBarLayer *s_detail_status_bar;         // The scrolling list layer for the main window
 static ScrollLayer *s_detail_scroll_layer;
 static TextLayer *s_detail_title_layer; // The text layer showing the event title in the detail window
 static TextLayer *s_detail_time_layer;
 static TextLayer *s_detail_meta_layer;
-static char s_detail_meta[360] = "Loading details...";  // The text layer showing the event time in the detail window
+static char s_detail_meta[360] = "Loading details...";
+static char s_detail_title_copy[MAX_TITLE_LEN];
+static AppTimer *s_detail_timeout=NULL;
+static int32_t s_detail_request_token=0;  // The text layer showing the event time in the detail window
 static TextLayer *s_toast_layer;        // The notification layer for the "Syncing..." status
 
 // --- Global Data Variables ---
@@ -60,8 +71,22 @@ static int s_restore_event_index = 0;
 static PreferredContentSize s_content_size = PreferredContentSizeMedium;
 static int s_font_mode = 0; // 0=System, 1=Small, 2=Medium, 3=Large
           // The index of the event the user clicked on
-static int s_use_24h = 0;                       // Flag: 0 for 12-hour AM/PM format, 1 for 24-hour format
-static CalendarSection s_sections[MAX_SECTIONS];// Array holding the grouping data for the Menu headers
+static CalendarSection s_sections[MAX_SECTIONS];
+static int s_visible_indices[MAX_EVENTS];
+static int s_visible_count = 0;
+static int s_theme = 0; // 0=Auto day/night, 1=Light, 2=Dark
+static bool s_show_past = false;
+static bool s_show_status_bar = false;
+static int s_time_mode = 0; // 0=System, 1=12h, 2=24h
+static time_t s_last_sync = 0;
+static uint32_t s_active_sync_id = 0, s_completed_sync_id = 0;
+static uint32_t s_transfer_checksum = 1, s_expected_checksum = 1;
+static int s_ack_chunk = -1;
+static uint32_t s_ack_id = 0;
+static int s_ack_attempts = 0;
+static AppTimer *s_ack_timer = NULL;
+static AppTimer *s_sync_watchdog = NULL;
+static AppTimer *s_pref_timer = NULL;// Array holding the grouping data for the Menu headers
 
 // --- Helper Functions ---
 // Muted source markers; monochrome watches use black bars.
@@ -85,7 +110,7 @@ static GColor event_color(uint8_t color) {
 // Formats a Unix timestamp into a human-readable time string (12h or 24h)
 static void format_time(char *buffer, int buf_size, time_t timestamp) {
   struct tm *t = localtime(&timestamp); // Convert the Unix timestamp to a local time structure
-  if (s_use_24h == 1) { // If the user prefers 24-hour time
+  if (s_time_mode == 2 || (s_time_mode == 0 && clock_is_24h_style())) { // System or explicit 24-hour
     strftime(buffer, buf_size, "%H:%M", t); // Format as HH:MM (e.g., 14:30)
   } else { // If the user prefers 12-hour time
     int hour = t->tm_hour; // Extract the hour (0-23)
@@ -106,48 +131,54 @@ static bool is_same_day(time_t t1, time_t t2) {
 }
 
 // Organizes the linear list of events into groups based on their calendar day
-static void update_sections() {
-  if (s_total_expected_events == 0 || !s_event_array) { s_num_sections = 0; return; } // If there is no data, exit the function
-  
-  s_num_sections = 0; // Reset the section count to zero
-  int current_start = 0; // Track the array index where the current day group begins
-  time_t now = time(NULL); // Get the current time on the watch
+// The stored event array is immutable during rendering. A visible-index map
+// filters completed events without losing data or disturbing detail lookup IDs.
+static void update_sections(void) {
+  s_num_sections = 0;
+  s_visible_count = 0;
+  if (!s_event_array || s_total_expected_events <= 0) return;
+  time_t now = time(NULL);
   struct tm tomorrow_tm = *localtime(&now);
   tomorrow_tm.tm_mday += 1;
   tomorrow_tm.tm_isdst = -1;
   time_t tomorrow = mktime(&tomorrow_tm);
-  
-  for (int i = 0; i < s_total_expected_events; i++) { // Loop through every event
-    time_t et = (time_t)s_event_array[i].timestamp; // Get the timestamp for the current event
-    
-    // If this is the first event, OR if this event is on a different day than the previous event
-    if (i == 0 || !is_same_day((time_t)s_event_array[i-1].timestamp, et)) {
-      if (s_num_sections > 0) { // If we were already building a section...
-        s_sections[s_num_sections - 1].count = i - current_start; // ...close it by calculating how many events it contained
-      }
-      if (s_num_sections < MAX_SECTIONS) { // Make sure we don't exceed our maximum allowed sections
-        s_sections[s_num_sections].start_index = i; // Mark this event as the start of a new section
-        
-        // Determine the header text: "Today", "Tomorrow", or the full date
-        strftime(s_sections[s_num_sections].date_text, 32, 
-                 is_same_day(now, et) ? "Today" : 
-                 is_same_day(tomorrow, et) ? "Tomorrow" : "%A, %b %d", 
-                 localtime(&et));
-                 
-        current_start = i; // Update the tracking variable to the current index
-        s_num_sections++; // Increment the total number of sections
-      }
+  for (int i = 0; i < s_total_expected_events && s_visible_count < MAX_EVENTS; i++) {
+    CalendarEvent *event = &s_event_array[i];
+    if (!s_show_past && (time_t)event->end_timestamp < now) continue;
+    time_t date = (time_t)event->timestamp;
+    bool new_day = s_num_sections == 0;
+    if (!new_day) {
+      int previous = s_visible_indices[s_visible_count - 1];
+      new_day = !is_same_day((time_t)s_event_array[previous].timestamp, date);
     }
-  }
-  // After the loop, close the final section by calculating its count
-  if (s_num_sections > 0) {
-    s_sections[s_num_sections - 1].count = s_total_expected_events - current_start;
+    if (new_day) {
+      if (s_num_sections >= MAX_SECTIONS) break;
+      CalendarSection *section = &s_sections[s_num_sections++];
+      section->start_index = s_visible_count;
+      section->count = 0;
+      strftime(section->date_text, sizeof(section->date_text),
+        is_same_day(now, date) ? "Today" :
+        is_same_day(tomorrow, date) ? "Tomorrow" : "%a, %b %d",
+        localtime(&date));
+    }
+    s_visible_indices[s_visible_count++] = i;
+    s_sections[s_num_sections - 1].count++;
   }
 }
+static bool dark_mode(void) {
+  if (s_theme == 1) return false;
+  if (s_theme == 2) return true;
+  time_t now = time(NULL);
+  struct tm *t = localtime(&now);
+  return t && (t->tm_hour < 7 || t->tm_hour >= 19);
+}
+static GColor ui_background(void) { return dark_mode() ? GColorBlack : GColorWhite; }
+static GColor ui_foreground(void) { return dark_mode() ? GColorWhite : GColorBlack; }
 
 static int effective_font_mode(void) {
   if (s_font_mode >= 1 && s_font_mode <= 3) return s_font_mode;
-  return (s_content_size >= PreferredContentSizeLarge) ? 3 : 2;
+  return (s_content_size >= PreferredContentSizeLarge) ? 3 :
+         (s_content_size == PreferredContentSizeSmall) ? 1 : 2;
 }
 static int row_height(void) {
   switch (effective_font_mode()) {
@@ -173,12 +204,11 @@ static void restore_selection(void) {
   if (index >= s_total_expected_events) index = s_total_expected_events - 1;
   if (index < 0) index = 0;
   for (int section = 0; section < s_num_sections; section++) {
-    if (index >= s_sections[section].start_index &&
-        index < s_sections[section].start_index + s_sections[section].count) {
-      menu_layer_set_selected_index(s_menu_layer,
-          (MenuIndex){.section=section,.row=index-s_sections[section].start_index},
-          MenuRowAlignCenter, false);
-      return;
+    for (int row = 0; row < s_sections[section].count; row++) {
+      if (s_visible_indices[s_sections[section].start_index + row] == index) {
+        menu_layer_set_selected_index(s_menu_layer, (MenuIndex){.section=section,.row=row}, MenuRowAlignCenter, false);
+        return;
+      }
     }
   }
 }
@@ -278,38 +308,44 @@ static void layout_detail_content(void) {
     y += height + (i == 0 ? 12 : 10);
   }
   y += PBL_IF_ROUND_ELSE(22, 12);
-  if (y < bounds.size.h) y = bounds.size.h;
+  if (y < bounds.size.h - (s_show_status_bar ? 16 : 0)) y = bounds.size.h - (s_show_status_bar ? 16 : 0);
   scroll_layer_set_content_size(s_detail_scroll_layer, GSize(bounds.size.w, y));
 }
 static void detail_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   GRect bounds = layer_get_bounds(root);
-  window_set_background_color(window, GColorWhite);
-  s_detail_scroll_layer = scroll_layer_create(bounds);
+  window_set_background_color(window, ui_background());
+  s_detail_scroll_layer = scroll_layer_create(GRect(0, s_show_status_bar ? 16 : 0, bounds.size.w, bounds.size.h - (s_show_status_bar ? 16 : 0)));
+  if (s_show_status_bar) {
+    s_detail_status_bar = status_bar_layer_create();
+    status_bar_layer_set_colors(s_detail_status_bar, ui_background(), ui_foreground());
+    layer_add_child(root, status_bar_layer_get_layer(s_detail_status_bar));
+  }
   scroll_layer_set_click_config_onto_window(s_detail_scroll_layer, window);
   layer_add_child(root, scroll_layer_get_layer(s_detail_scroll_layer));
   const int font = effective_font_mode();
   s_detail_time_layer = text_layer_create(GRect(0, 0, bounds.size.w, 48));
   text_layer_set_font(s_detail_time_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
-  text_layer_set_text_color(s_detail_time_layer, GColorBlack);
+  text_layer_set_text_color(s_detail_time_layer, ui_foreground());
   text_layer_set_background_color(s_detail_time_layer, GColorClear);
   scroll_layer_add_child(s_detail_scroll_layer, text_layer_get_layer(s_detail_time_layer));
   s_detail_title_layer = text_layer_create(GRect(0, 0, bounds.size.w, 48));
   text_layer_set_font(s_detail_title_layer, fonts_get_system_font(
     font == 3 ? FONT_KEY_GOTHIC_28_BOLD : FONT_KEY_GOTHIC_24_BOLD));
-  text_layer_set_text_color(s_detail_title_layer, GColorBlack);
+  text_layer_set_text_color(s_detail_title_layer, ui_foreground());
   text_layer_set_background_color(s_detail_title_layer, GColorClear);
   scroll_layer_add_child(s_detail_scroll_layer, text_layer_get_layer(s_detail_title_layer));
   s_detail_meta_layer = text_layer_create(GRect(0, 0, bounds.size.w, 48));
   text_layer_set_font(s_detail_meta_layer, fonts_get_system_font(
     font == 1 ? FONT_KEY_GOTHIC_18 : (font == 3 ? FONT_KEY_GOTHIC_28 : FONT_KEY_GOTHIC_24)));
-  text_layer_set_text_color(s_detail_meta_layer, GColorBlack);
+  text_layer_set_text_color(s_detail_meta_layer, ui_foreground());
   text_layer_set_background_color(s_detail_meta_layer, GColorClear);
   text_layer_set_text(s_detail_meta_layer, s_detail_meta);
   scroll_layer_add_child(s_detail_scroll_layer, text_layer_get_layer(s_detail_meta_layer));
   if (s_event_array && s_selected_event_index < s_total_expected_events) {
     CalendarEvent *ev = &s_event_array[s_selected_event_index];
-    text_layer_set_text(s_detail_title_layer, ev->title);
+    snprintf(s_detail_title_copy, sizeof(s_detail_title_copy), "%s", ev->title);
+    text_layer_set_text(s_detail_title_layer, s_detail_title_copy);
     static char when[64], begin[16], finish[16], date[20];
     time_t start = (time_t)ev->timestamp;
     strftime(date, sizeof(date), "%a, %b %d", localtime(&start));
@@ -321,17 +357,29 @@ static void detail_load(Window *window) {
   layout_detail_content();
 }
 static void detail_unload(Window *window) {
+  if (s_detail_timeout) { app_timer_cancel(s_detail_timeout); s_detail_timeout=NULL; }
   text_layer_destroy(s_detail_title_layer);
   text_layer_destroy(s_detail_time_layer);
   text_layer_destroy(s_detail_meta_layer);
   s_detail_meta_layer = NULL;
   scroll_layer_destroy(s_detail_scroll_layer);
+  if (s_detail_status_bar) { status_bar_layer_destroy(s_detail_status_bar); s_detail_status_bar = NULL; }
+}
+
+static void detail_timeout_callback(void *context) {
+  s_detail_timeout=NULL;
+  if (!s_detail_meta_layer || strcmp(s_detail_meta, "Loading details...")!=0) return;
+  snprintf(s_detail_meta, sizeof(s_detail_meta), "Details unavailable offline.\\nThe event list is saved on your watch.");
+  text_layer_set_text(s_detail_meta_layer, s_detail_meta);
+  layout_detail_content();
 }
 
 // Opens the detail window for a specific event index
 static void show_detail(int index) {
   if (!s_event_array || index < 0 || index >= s_total_expected_events) return;
+  if (s_detail_timeout) { app_timer_cancel(s_detail_timeout); s_detail_timeout=NULL; }
   snprintf(s_detail_meta, sizeof(s_detail_meta), "Loading details...");
+  s_detail_request_token++;
   s_selected_event_index = index; // Save the clicked index to the global variable
   if (!s_detail_window) { // If the window doesn't exist yet, create it
     s_detail_window = window_create();
@@ -344,8 +392,10 @@ static void show_detail(int index) {
   DictionaryIterator *request;
   if (app_message_outbox_begin(&request) == APP_MSG_OK) {
     dict_write_int32(request, MESSAGE_KEY_DETAIL_REQUEST, index);
+    dict_write_int32(request, MESSAGE_KEY_DETAIL_TOKEN, s_detail_request_token);
     app_message_outbox_send();
   }
+  s_detail_timeout=app_timer_register(8000,detail_timeout_callback,NULL);
 }
 
 // --- MenuLayer Callbacks ---
@@ -387,15 +437,15 @@ static void draw_row_callback(GContext* ctx, const Layer *l, MenuIndex *i, void 
   }
   
   // Calculate which event this row corresponds to
-  CalendarEvent ev = s_event_array[s_sections[i->section].start_index + i->row];
+  CalendarEvent ev = s_event_array[s_visible_indices[s_sections[i->section].start_index + i->row]];
   graphics_context_set_fill_color(ctx, event_color(ev.color));
   graphics_fill_rect(ctx, GRect(0, 3, 4, row_height() - 6), 0, GCornerNone);
   static char t_b[16]; 
   format_time(t_b, 16, ev.timestamp); // Format the start time
   
-  MenuIndex selected = menu_layer_get_selected_index(s_menu_layer);
-  bool highlighted = selected.section == i->section && selected.row == i->row;
-  graphics_context_set_text_color(ctx, highlighted ? PBL_IF_COLOR_ELSE(GColorBlack, GColorWhite) : GColorBlack); // Keep highlighted text readable
+  bool highlighted = menu_cell_layer_is_highlighted(l);
+  GColor selected_text = dark_mode() ? GColorBlack : PBL_IF_COLOR_ELSE(GColorBlack, GColorWhite);
+  graphics_context_set_text_color(ctx, highlighted ? selected_text : ui_foreground()); // Keep highlighted text readable
   // Draw the time text in the top half of the row
   graphics_draw_text(ctx, t_b, fonts_get_system_font(time_font()), GRect(9, 0, layer_get_bounds(l).size.w - 14, 20), 0, GTextAlignmentLeft, NULL);
   // Respect the user's system text size.
@@ -405,32 +455,255 @@ static void draw_row_callback(GContext* ctx, const Layer *l, MenuIndex *i, void 
 // Handles what happens when the user clicks the "Select" (middle) button on a row
 static void select_click_callback(MenuLayer *m, MenuIndex *i, void *d) { 
   if(s_num_sections > 0) { // If actual data exists
-    s_restore_event_index = s_sections[i->section].start_index + i->row;
+    s_restore_event_index = s_visible_indices[s_sections[i->section].start_index + i->row];
     persist_write_int(PERSIST_KEY_SELECTION, s_restore_event_index);
-    show_detail(s_sections[i->section].start_index + i->row); // Open the detail window for that specific event
+    show_detail(s_visible_indices[s_sections[i->section].start_index + i->row]); // Open the detail window for that specific event
   }
 }
 
 // Handles what happens when the user LONG-PRESSES the "Select" (middle) button on a row
+static void open_settings(void);
 static void select_long_click_callback(MenuLayer *m, MenuIndex *i, void *d) {
-  // 1. Immediately unhide the "Syncing..." toast so the user knows it worked
-  layer_set_hidden(text_layer_get_layer(s_toast_layer), false); 
-  
-  // 2. Send the "Help Signal" to the phone. 
-  // (The JS is programmed to ignore the 30-min timer whenever it receives this)
-  DictionaryIterator *out;
-  app_message_outbox_begin(&out); // Start an outgoing message
-  dict_write_uint8(out, 0, 1); // Write a dummy byte just to trigger the listener
-  app_message_outbox_send(); // Send the message to the phone
+  open_settings();
 }
 
-// --- Communications ---
+// --- Watch-side settings; no phone connection is needed to change UI options. ---
+enum { SETTING_SYNC, SETTING_THEME, SETTING_FONT, SETTING_PAST,
+       SETTING_TIME, SETTING_STATUS_BAR, SETTING_LAST_SYNC, SETTINGS_COUNT };
 
-// Handles all incoming messages from the phone (JavaScript)
+static void apply_main_theme(void) {
+  if (!s_main_window || !s_menu_layer) return;
+  window_set_background_color(s_main_window, ui_background());
+  menu_layer_set_normal_colors(s_menu_layer, ui_background(), ui_foreground());
+  menu_layer_set_highlight_colors(s_menu_layer,
+    dark_mode() ? GColorWhite : PBL_IF_COLOR_ELSE(GColorCyan, GColorBlack),
+    dark_mode() ? GColorBlack : PBL_IF_COLOR_ELSE(GColorBlack, GColorWhite));
+  menu_layer_reload_data(s_menu_layer);
+  if (s_settings_menu) {
+    window_set_background_color(s_settings_window, ui_background());
+    menu_layer_set_normal_colors(s_settings_menu, ui_background(), ui_foreground());
+    menu_layer_set_highlight_colors(s_settings_menu,
+      dark_mode() ? GColorWhite : PBL_IF_COLOR_ELSE(GColorCyan, GColorBlack),
+      dark_mode() ? GColorBlack : PBL_IF_COLOR_ELSE(GColorBlack, GColorWhite));
+    menu_layer_reload_data(s_settings_menu);
+  }
+}
+static void sync_watchdog(void *context) {
+  s_sync_watchdog=NULL;
+  if (s_sync_in_progress && s_toast_layer) {
+    text_layer_set_text(s_toast_layer, "Sync delayed (cached)");
+    layer_set_hidden(text_layer_get_layer(s_toast_layer), false);
+  }
+}
+static void request_calendar_sync(bool force) {
+  DictionaryIterator *out = NULL;
+  AppMessageResult result = app_message_outbox_begin(&out);
+  if (result == APP_MSG_OK && out) {
+    dict_write_cstring(out, MESSAGE_KEY_SYNC_COMMAND, force ? "refresh" : "sync");
+    result = app_message_outbox_send();
+  }
+  if (result == APP_MSG_OK) {
+    if (s_sync_watchdog) app_timer_cancel(s_sync_watchdog);
+    s_sync_watchdog=app_timer_register(60000,sync_watchdog,NULL);
+    s_sync_in_progress = true;
+    text_layer_set_text(s_toast_layer, "Syncing data...");
+    layer_set_hidden(text_layer_get_layer(s_toast_layer), false);
+  } else {
+    text_layer_set_text(s_toast_layer, "Phone unavailable");
+    layer_set_hidden(text_layer_get_layer(s_toast_layer), false);
+  }
+}
+static uint16_t settings_rows(MenuLayer *menu, uint16_t section, void *data) {
+  return SETTINGS_COUNT;
+}
+static void settings_draw(GContext *ctx, const Layer *layer, MenuIndex *index, void *data) {
+  static char last[40];
+  const char *title = "", *subtitle = "";
+  switch (index->row) {
+    case SETTING_SYNC: title="Force Sync"; subtitle="Fetch calendar now"; break;
+    case SETTING_THEME:
+      title="Appearance";
+      subtitle=s_theme==1 ? "Light" : s_theme==2 ? "Dark" : "Auto (day/night)";
+      break;
+    case SETTING_FONT:
+      title="Font Size";
+      subtitle=s_font_mode==1 ? "Small" : s_font_mode==2 ? "Medium" :
+               s_font_mode==3 ? "Large" : "System";
+      break;
+    case SETTING_PAST:
+      title="Past Events"; subtitle=s_show_past ? "Show" : "Hide"; break;
+    case SETTING_TIME:
+      title="Time Format";
+      subtitle=s_time_mode==1 ? "12 hour" : s_time_mode==2 ? "24 hour" : "System";
+      break;
+    case SETTING_STATUS_BAR:
+      title="Detail Status Bar"; subtitle=s_show_status_bar ? "On" : "Off"; break;
+    case SETTING_LAST_SYNC:
+      title="Last Updated";
+      if (!s_last_sync) subtitle="Not yet synced";
+      else {
+        strftime(last, sizeof(last), "%a %b %d %H:%M", localtime(&s_last_sync));
+        subtitle=last;
+      }
+      break;
+  }
+  menu_cell_basic_draw(ctx, layer, title, subtitle, NULL);
+}
+// Keep phone configuration in step with preferences changed directly on-watch.
+static void send_watch_preferences(void) {
+  DictionaryIterator *out=NULL;
+  if (app_message_outbox_begin(&out) != APP_MSG_OK || !out) return;
+  char theme[4], font[4], past[4], bar[4];
+  snprintf(theme,sizeof(theme),"%d",s_theme);
+  snprintf(font,sizeof(font),"%d",s_font_mode);
+  snprintf(past,sizeof(past),"%d",s_show_past?1:0);
+  snprintf(bar,sizeof(bar),"%d",s_show_status_bar?1:0);
+  dict_write_uint8(out, MESSAGE_KEY_WATCH_PREFS, 1);
+  dict_write_cstring(out, MESSAGE_KEY_THEME_MODE, theme);
+  dict_write_cstring(out, MESSAGE_KEY_FONT_SIZE, font);
+  dict_write_cstring(out, MESSAGE_KEY_SHOW_PAST, past);
+  dict_write_cstring(out, MESSAGE_KEY_DETAIL_STATUS_BAR, bar);
+  dict_write_cstring(out, MESSAGE_KEY_TIME_FORMAT,
+    s_time_mode==1 ? "12h" : s_time_mode==2 ? "24h" : "System");
+  app_message_outbox_send();
+}
+static void pending_pref_sync(void *context) {
+  s_pref_timer=NULL;
+  send_watch_preferences();
+}
+static void schedule_pref_sync(void) {
+  if (s_pref_timer) app_timer_cancel(s_pref_timer);
+  s_pref_timer=app_timer_register(500,pending_pref_sync,NULL);
+}
+static void settings_select(MenuLayer *menu, MenuIndex *index, void *data) {
+  switch (index->row) {
+    case SETTING_SYNC:
+      request_calendar_sync(true);
+      window_stack_pop(true);
+      break;
+    case SETTING_THEME:
+      s_theme = (s_theme + 1) % 3;
+      persist_write_int(PERSIST_KEY_THEME, s_theme);
+      apply_main_theme();
+      break;
+    case SETTING_FONT:
+      s_font_mode = (s_font_mode + 1) % 4;
+      persist_write_int(PERSIST_KEY_FONT_SIZE, s_font_mode);
+      menu_layer_reload_data(s_menu_layer);
+      break;
+    case SETTING_PAST:
+      s_show_past = !s_show_past;
+      persist_write_bool(PERSIST_KEY_SHOW_PAST, s_show_past);
+      update_sections();
+      menu_layer_reload_data(s_menu_layer);
+      restore_selection();
+      break;
+    case SETTING_TIME:
+      s_time_mode = (s_time_mode + 1) % 3;
+      persist_write_int(PERSIST_KEY_TIME_MODE, s_time_mode);
+      menu_layer_reload_data(s_menu_layer);
+      refresh_glance();
+      break;
+    case SETTING_STATUS_BAR:
+      s_show_status_bar = !s_show_status_bar;
+      persist_write_bool(PERSIST_KEY_STATUS_BAR, s_show_status_bar);
+      break;
+    default: break;
+  }
+  if (index->row != SETTING_SYNC && index->row != SETTING_LAST_SYNC)
+    schedule_pref_sync();
+  if (s_settings_menu) menu_layer_reload_data(s_settings_menu);
+}
+static void settings_load(Window *window) {
+  Layer *root=window_get_root_layer(window);
+  s_settings_menu=menu_layer_create(layer_get_bounds(root));
+  menu_layer_set_callbacks(s_settings_menu, NULL, (MenuLayerCallbacks){
+    .get_num_rows=settings_rows, .draw_row=settings_draw,
+    .select_click=settings_select
+  });
+  menu_layer_set_click_config_onto_window(s_settings_menu, window);
+  layer_add_child(root, menu_layer_get_layer(s_settings_menu));
+  apply_main_theme();
+}
+static void settings_unload(Window *window) {
+  menu_layer_destroy(s_settings_menu);
+  s_settings_menu=NULL;
+}
+static void open_settings(void) {
+  if (!s_settings_window) {
+    s_settings_window=window_create();
+    window_set_window_handlers(s_settings_window, (WindowHandlers){
+      .load=settings_load, .unload=settings_unload
+    });
+  }
+  window_stack_push(s_settings_window, true);
+}
+static void minute_tick(struct tm *tick_time, TimeUnits changed) {
+  if (!s_main_window || !s_menu_layer) return;
+  update_sections();
+  apply_main_theme();
+}
+
+// --- Transactional AppMessage transport, using a watch-side ACK per chunk. ---
+static uint32_t checksum_bytes(uint32_t checksum, const uint8_t *bytes, size_t length) {
+  uint32_t a=checksum & 65535, b=(checksum >> 16) & 65535;
+  for (size_t i=0; i<length; i++) {
+    a=(a+bytes[i])%65521;
+    b=(b+a)%65521;
+  }
+  return (b<<16)|a;
+}
+static void retry_ack(void *context);
+static void send_ack(uint32_t id, int index) {
+  if (s_ack_timer) { app_timer_cancel(s_ack_timer); s_ack_timer=NULL; }
+  if (s_ack_id != id || s_ack_chunk != index) s_ack_attempts=0;
+  s_ack_id=id;
+  s_ack_chunk=index;
+  DictionaryIterator *out=NULL;
+  AppMessageResult result=app_message_outbox_begin(&out);
+  if (result == APP_MSG_OK && out) {
+    dict_write_int32(out, MESSAGE_KEY_SYNC_ID, (int32_t)id);
+    dict_write_int32(out, MESSAGE_KEY_CHUNK_ACK, index);
+    result=app_message_outbox_send();
+  }
+  if (result != APP_MSG_OK && s_ack_attempts++ < 5) {
+    s_ack_timer=app_timer_register(250, retry_ack, NULL);
+  }
+}
+static void retry_ack(void *context) {
+  s_ack_timer=NULL;
+  if (s_ack_chunk >= 0) send_ack(s_ack_id, s_ack_chunk);
+}
+static void ack_outbox_failed(DictionaryIterator *iter, AppMessageResult reason, void *context) {
+  if (!iter || !dict_find(iter, MESSAGE_KEY_CHUNK_ACK)) return;
+  if (s_ack_chunk >= 0 && !s_ack_timer && s_ack_attempts++ < 5)
+    s_ack_timer=app_timer_register(300, retry_ack, NULL);
+}
+static void finish_calendar_sync(CalendarEvent *incoming, int total, uint32_t id) {
+  if (s_event_array) free(s_event_array);
+  s_event_array=incoming;
+  s_new_data_buffer=NULL;
+  s_total_expected_events=total;
+  s_sync_in_progress=false;
+  if (s_sync_watchdog) { app_timer_cancel(s_sync_watchdog); s_sync_watchdog=NULL; }
+  s_completed_sync_id=id;
+  s_active_sync_id=0;
+  s_last_sync=time(NULL);
+  persist_write_int(PERSIST_KEY_LAST_SYNC, (int)s_last_sync);
+  update_sections();
+  menu_layer_reload_data(s_menu_layer);
+  restore_selection();
+  save_data_to_storage();
+  refresh_glance();
+  layer_set_hidden(text_layer_get_layer(s_toast_layer), true);
+  if (s_settings_menu) menu_layer_reload_data(s_settings_menu);
+}
 static void inbox_handler(DictionaryIterator *iter, void *ctx) {
-  
-  Tuple *detail = dict_find(iter, MESSAGE_KEY_DETAIL_TEXT);
+  Tuple *detail=dict_find(iter, MESSAGE_KEY_DETAIL_TEXT);
   if (detail && detail->type == TUPLE_CSTRING) {
+    Tuple *token=dict_find(iter, MESSAGE_KEY_DETAIL_TOKEN);
+    if (!token || token->value->int32 != s_detail_request_token) return;
+    if (s_detail_timeout) { app_timer_cancel(s_detail_timeout); s_detail_timeout=NULL; }
     snprintf(s_detail_meta, sizeof(s_detail_meta), "%s", detail->value->cstring);
     if (s_detail_meta_layer) {
       text_layer_set_text(s_detail_meta_layer, s_detail_meta);
@@ -438,95 +711,126 @@ static void inbox_handler(DictionaryIterator *iter, void *ctx) {
     }
     return;
   }
-  Tuple *status = dict_find(iter, MESSAGE_KEY_SYNC_STATUS);
-  if (status && status->type == TUPLE_CSTRING && strcmp(status->value->cstring, "error") == 0) {
-    s_sync_in_progress = false;
-    text_layer_set_text(s_toast_layer, "Sync failed");
-    layer_set_hidden(text_layer_get_layer(s_toast_layer), false);
-    menu_layer_reload_data(s_menu_layer);
+  Tuple *status=dict_find(iter, MESSAGE_KEY_SYNC_STATUS);
+  if (status && status->type == TUPLE_CSTRING) {
+    if (strcmp(status->value->cstring, "error") == 0) {
+      s_sync_in_progress=false;
+      if (s_sync_watchdog) { app_timer_cancel(s_sync_watchdog); s_sync_watchdog=NULL; }
+      text_layer_set_text(s_toast_layer, "Sync failed (cached)");
+      layer_set_hidden(text_layer_get_layer(s_toast_layer), false);
+      menu_layer_reload_data(s_menu_layer);
+    }
     return;
   }
-  Tuple *font_tuple = dict_find(iter, MESSAGE_KEY_FONT_SIZE);
-  if (font_tuple && font_tuple->type == TUPLE_CSTRING) {
-    int mode = atoi(font_tuple->value->cstring);
-    if (mode >= 0 && mode <= 3) {
-      s_font_mode = mode;
-      persist_write_int(PERSIST_KEY_FONT_SIZE, mode);
+  Tuple *font=dict_find(iter, MESSAGE_KEY_FONT_SIZE);
+  if (font && font->type == TUPLE_CSTRING) {
+    int value=atoi(font->value->cstring);
+    if (value >= 0 && value <= 3) {
+      s_font_mode=value;
+      persist_write_int(PERSIST_KEY_FONT_SIZE, value);
       menu_layer_reload_data(s_menu_layer);
     }
   }
-  // 1. Check if the message contains a 12h/24h time format setting update
-  Tuple *f_t = dict_find(iter, MESSAGE_KEY_TIME_FORMAT);
-  if (f_t) { 
-    s_use_24h = (strcmp(f_t->value->cstring, "24h") == 0); // Convert the string "24h" to an integer 1
-    persist_write_int(PERSIST_KEY_TIME_24H, s_use_24h); // Save preference permanently
-    menu_layer_reload_data(s_menu_layer); // Refresh the menu to apply new time format
+  Tuple *theme=dict_find(iter, MESSAGE_KEY_THEME_MODE);
+  if (theme && theme->type == TUPLE_CSTRING) {
+    int value=atoi(theme->value->cstring);
+    if (value >= 0 && value <= 2) {
+      s_theme=value;
+      persist_write_int(PERSIST_KEY_THEME, value);
+      apply_main_theme();
+    }
   }
-
-  // 2. Check if the message contains Calendar Data
-  Tuple *t_t = dict_find(iter, MESSAGE_KEY_TOTAL_EVENTS); // Total expected events
-  Tuple *c_t = dict_find(iter, MESSAGE_KEY_CHUNK_INDEX);  // Which chunk this is
-  Tuple *d_t = dict_find(iter, MESSAGE_KEY_EVENT_DATA);   // The actual byte array of data
-
-  // Strictly validate incoming chunks before writing into watch memory.
-  if (t_t && c_t && d_t) {
-    int total = t_t->value->int32;
-    int chunk = c_t->value->int32;
-    if (total < 0 || total > MAX_EVENTS || chunk < 0 ||
-        (total > 0 && chunk >= (total + CHUNK_SIZE - 1) / CHUNK_SIZE) ||
-        d_t->type != TUPLE_BYTE_ARRAY) return;
-    int expected_count = total - chunk * CHUNK_SIZE;
-    if (expected_count > CHUNK_SIZE) expected_count = CHUNK_SIZE;
-    if (total == 0) {
-      if (chunk != 0 || d_t->length != 0) return;
-      if (s_new_data_buffer) free(s_new_data_buffer);
-      s_new_data_buffer = NULL;
-      if (s_event_array) free(s_event_array);
-      s_event_array = NULL;
-      s_total_expected_events = 0;
-      s_num_sections = 0;
-      s_sync_in_progress = false;
-      persist_write_int(PERSIST_KEY_VERSION, STORAGE_VERSION);
-      persist_write_int(PERSIST_KEY_COUNT, 0);
-      menu_layer_reload_data(s_menu_layer);
-      refresh_glance();
-      layer_set_hidden(text_layer_get_layer(s_toast_layer), true);
+  Tuple *past=dict_find(iter, MESSAGE_KEY_SHOW_PAST);
+  if (past && past->type == TUPLE_CSTRING) {
+    s_show_past=atoi(past->value->cstring)!=0;
+    persist_write_bool(PERSIST_KEY_SHOW_PAST, s_show_past);
+    update_sections();
+    menu_layer_reload_data(s_menu_layer);
+    restore_selection();
+  }
+  Tuple *bar=dict_find(iter, MESSAGE_KEY_DETAIL_STATUS_BAR);
+  if (bar && bar->type == TUPLE_CSTRING) {
+    s_show_status_bar=atoi(bar->value->cstring)!=0;
+    persist_write_bool(PERSIST_KEY_STATUS_BAR, s_show_status_bar);
+  }
+  Tuple *format=dict_find(iter, MESSAGE_KEY_TIME_FORMAT);
+  if (format && format->type == TUPLE_CSTRING) {
+    const char *val=format->value->cstring;
+    s_time_mode=strcmp(val,"24h")==0 ? 2 :
+                strcmp(val,"12h")==0 ? 1 : 0;
+    persist_write_int(PERSIST_KEY_TIME_MODE, s_time_mode);
+    menu_layer_reload_data(s_menu_layer);
+    refresh_glance();
+  }
+  Tuple *total_tuple=dict_find(iter, MESSAGE_KEY_TOTAL_EVENTS);
+  Tuple *chunk_tuple=dict_find(iter, MESSAGE_KEY_CHUNK_INDEX);
+  Tuple *id_tuple=dict_find(iter, MESSAGE_KEY_SYNC_ID);
+  Tuple *checksum_tuple=dict_find(iter, MESSAGE_KEY_SYNC_CHECKSUM);
+  Tuple *data_tuple=dict_find(iter, MESSAGE_KEY_EVENT_DATA);
+  if (!total_tuple || !chunk_tuple || !id_tuple || !checksum_tuple) return;
+  int total=total_tuple->value->int32;
+  int chunk=chunk_tuple->value->int32;
+  uint32_t id=(uint32_t)id_tuple->value->int32;
+  uint32_t expected=(uint32_t)checksum_tuple->value->int32;
+  if (!id || total<0 || total>MAX_EVENTS || chunk<0 ||
+      (total>0 && chunk >= (total+CHUNK_SIZE-1)/CHUNK_SIZE)) return;
+  if (id==s_completed_sync_id) {
+    int final_chunk=total ? (total-1)/CHUNK_SIZE : 0;
+    if (chunk==final_chunk) send_ack(id, chunk); // Lost final ACK.
+    return;
+  }
+  if (total==0) {
+    if (chunk!=0 || expected!=1) return;
+    if (s_new_data_buffer) { free(s_new_data_buffer); s_new_data_buffer=NULL; }
+    finish_calendar_sync(NULL, 0, id);
+    send_ack(id, 0);
+    return;
+  }
+  if (!data_tuple || data_tuple->type!=TUPLE_BYTE_ARRAY) return;
+  int count=total-chunk*CHUNK_SIZE;
+  if (count > CHUNK_SIZE) count=CHUNK_SIZE;
+  if (count<=0 || data_tuple->length != (size_t)(count*sizeof(CalendarEvent))) return;
+  if (chunk==0 && (s_active_sync_id!=id || !s_new_data_buffer)) {
+    if (s_new_data_buffer) free(s_new_data_buffer);
+    s_new_data_buffer=calloc(total, sizeof(CalendarEvent));
+    if (!s_new_data_buffer) return;
+    s_active_sync_id=id;
+    s_events_received_so_far=0;
+    s_next_chunk=0;
+    s_transfer_checksum=1;
+    s_expected_checksum=expected;
+    s_sync_in_progress=true;
+    text_layer_set_text(s_toast_layer, "Syncing data...");
+    layer_set_hidden(text_layer_get_layer(s_toast_layer), false);
+  }
+  if (s_active_sync_id != id || !s_new_data_buffer || s_expected_checksum != expected) return;
+  if (chunk == s_next_chunk-1) {
+    send_ack(id, chunk); // Repeated packet after ACK loss: no double copy/checksum.
+    return;
+  }
+  if (chunk != s_next_chunk) return;
+  const CalendarEvent *incoming=(const CalendarEvent*)data_tuple->value->data;
+  for (int i=0;i<count;i++) {
+    if (!memchr(incoming[i].title, '\0', MAX_TITLE_LEN)) return;
+  }
+  memcpy(&s_new_data_buffer[chunk*CHUNK_SIZE], data_tuple->value->data, data_tuple->length);
+  s_transfer_checksum=checksum_bytes(s_transfer_checksum, data_tuple->value->data, data_tuple->length);
+  s_events_received_so_far+=count;
+  s_next_chunk++;
+  if (s_events_received_so_far == total) {
+    if (s_transfer_checksum != s_expected_checksum) {
+      APP_LOG(APP_LOG_LEVEL_WARNING, "Calendar checksum mismatch; retaining cached events");
+      free(s_new_data_buffer);
+      s_new_data_buffer=NULL;
+      s_active_sync_id=0;
+      s_sync_in_progress=false;
+      text_layer_set_text(s_toast_layer, "Sync integrity error");
+      layer_set_hidden(text_layer_get_layer(s_toast_layer), false);
       return;
     }
-    if (expected_count <= 0 ||
-        d_t->length != expected_count * sizeof(CalendarEvent)) return;
-    if (chunk == 0) {
-      if (s_new_data_buffer) free(s_new_data_buffer);
-      s_new_data_buffer = calloc(total, sizeof(CalendarEvent));
-      s_events_received_so_far = 0;
-      s_next_chunk = 0;
-      s_sync_in_progress = (s_new_data_buffer != NULL);
-      text_layer_set_text(s_toast_layer, "Syncing data...");
-      layer_set_hidden(text_layer_get_layer(s_toast_layer), !s_sync_in_progress);
-    }
-    if (!s_sync_in_progress || chunk != s_next_chunk) return;
-    const CalendarEvent *incoming = (const CalendarEvent *)d_t->value->data;
-    for (int i = 0; i < expected_count; i++) {
-      if (!memchr(incoming[i].title, 0, MAX_TITLE_LEN)) return;
-    }
-    memcpy(&s_new_data_buffer[chunk * CHUNK_SIZE],
-           d_t->value->data, d_t->length);
-    s_events_received_so_far += expected_count;
-    s_next_chunk++;
-    if (s_events_received_so_far == total) {
-      if (s_event_array) free(s_event_array);
-      s_event_array = s_new_data_buffer;
-      s_new_data_buffer = NULL;
-      s_total_expected_events = total;
-      s_sync_in_progress = false;
-      update_sections();
-      menu_layer_reload_data(s_menu_layer);
-      restore_selection();
-      save_data_to_storage();
-      refresh_glance();
-      layer_set_hidden(text_layer_get_layer(s_toast_layer), true);
-    }
+    finish_calendar_sync(s_new_data_buffer, total, id);
   }
+  send_ack(id, chunk);
 }
 
 // --- Main App Lifecycle ---
@@ -538,8 +842,9 @@ static void main_load(Window *window) {
   
   // Create and configure the MenuLayer (The scrolling list)
   s_menu_layer = menu_layer_create(bounds);
-  menu_layer_set_normal_colors(s_menu_layer, GColorWhite, GColorBlack); // White background, Black text
-  menu_layer_set_highlight_colors(s_menu_layer, PBL_IF_COLOR_ELSE(GColorCyan, GColorBlack), PBL_IF_COLOR_ELSE(GColorBlack, GColorWhite)); // Cyan highlight, Black text
+  window_set_background_color(window, ui_background());
+  menu_layer_set_normal_colors(s_menu_layer, ui_background(), ui_foreground()); // White background, Black text
+  menu_layer_set_highlight_colors(s_menu_layer, dark_mode() ? GColorWhite : PBL_IF_COLOR_ELSE(GColorCyan, GColorBlack), dark_mode() ? GColorBlack : PBL_IF_COLOR_ELSE(GColorBlack, GColorWhite)); // Cyan highlight, Black text
 
   // Register all the drawing/logic callbacks for the MenuLayer
   menu_layer_set_callbacks(s_menu_layer, NULL, (MenuLayerCallbacks){
@@ -592,8 +897,14 @@ static void init() {
     if (saved >= 0 && saved <= 3) s_font_mode = saved;
   }
   if (persist_exists(PERSIST_KEY_SELECTION)) s_restore_event_index = persist_read_int(PERSIST_KEY_SELECTION);
+  if (persist_exists(PERSIST_KEY_THEME)) s_theme = persist_read_int(PERSIST_KEY_THEME);
+  if (persist_exists(PERSIST_KEY_SHOW_PAST)) s_show_past = persist_read_bool(PERSIST_KEY_SHOW_PAST);
+  if (persist_exists(PERSIST_KEY_STATUS_BAR)) s_show_status_bar = persist_read_bool(PERSIST_KEY_STATUS_BAR);
+  if (persist_exists(PERSIST_KEY_TIME_MODE)) s_time_mode = persist_read_int(PERSIST_KEY_TIME_MODE);
+  else if (persist_exists(PERSIST_KEY_TIME_24H)) s_time_mode = persist_read_int(PERSIST_KEY_TIME_24H) ? 2 : 1;
+  if (persist_exists(PERSIST_KEY_LAST_SYNC)) s_last_sync = (time_t)persist_read_int(PERSIST_KEY_LAST_SYNC);
   // Load user preference for 12/24 hour time
-  if (persist_exists(PERSIST_KEY_TIME_24H)) s_use_24h = persist_read_int(PERSIST_KEY_TIME_24H);
+  // Clock preferences are now controlled through s_time_mode.
   
   // Load cached calendar data from permanent storage
   if (persist_exists(PERSIST_KEY_COUNT)) load_data_from_storage();
@@ -602,8 +913,10 @@ static void init() {
   window_stack_push(s_main_window, true);
   restore_selection();
   
+  tick_timer_service_subscribe(MINUTE_UNIT, minute_tick);
   // Register the function to listen for Bluetooth messages
   app_message_register_inbox_received(inbox_handler);
+  app_message_register_outbox_failed(ack_outbox_failed);
   // Open the Bluetooth channels (Input buffer: 2048 bytes, Output buffer: 512 bytes)
   app_message_open(512, 128);
 
@@ -611,19 +924,22 @@ static void init() {
   if (s_total_expected_events == 0) {
     s_sync_in_progress = true;
     layer_set_hidden(text_layer_get_layer(s_toast_layer), false); // Show the "Syncing" toast immediately
-    DictionaryIterator *out;
-    app_message_outbox_begin(&out); // Start an outgoing message
-    dict_write_uint8(out, 0, 1); // Write a dummy byte to act as a signal ping
-    app_message_outbox_send(); // Send the message to the phone
+    request_calendar_sync(false);
   }
 }
 
 // The cleanup function that runs right before the app exits completely
 static void deinit() {
-  window_destroy(s_main_window); // Destroy the main window
-  if (s_detail_window) window_destroy(s_detail_window); // Destroy detail window if it was left open
-  if (s_event_array) { free(s_event_array); s_event_array = NULL; } // Free active data memory
-  if (s_new_data_buffer) { free(s_new_data_buffer); s_new_data_buffer = NULL; } // Free incoming buffer memory
+  tick_timer_service_unsubscribe();
+  if (s_ack_timer) app_timer_cancel(s_ack_timer);
+  if (s_detail_timeout) { app_timer_cancel(s_detail_timeout); s_detail_timeout=NULL; }
+  if (s_pref_timer) { app_timer_cancel(s_pref_timer); s_pref_timer=NULL; }
+  if (s_sync_watchdog) app_timer_cancel(s_sync_watchdog);
+  if (s_settings_window) window_destroy(s_settings_window);
+  if (s_detail_window) window_destroy(s_detail_window);
+  window_destroy(s_main_window);
+  if (s_event_array) free(s_event_array);
+  if (s_new_data_buffer) free(s_new_data_buffer);
 }
 
 // The standard main loop required by all C programs

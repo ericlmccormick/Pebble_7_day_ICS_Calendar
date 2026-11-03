@@ -33,6 +33,7 @@ Request.prototype.send = function() {
 const context = {
   localStorage: settings, XMLHttpRequest: Request, PROXY_URL: 'https://example.test/proxy',
   syncBusy:false, pendingRefresh:false, MAX_EVENTS:48,
+  persistDetailCache:function(){}, detailCacheRestored:false,
   Pebble:{getActiveWatchInfo:function(){return {platform:'emery'};},sendAppMessage:function(){}},
   sendEventByteArray:function(events,start,done){transmitted.push(events);done(true);},
   console:console

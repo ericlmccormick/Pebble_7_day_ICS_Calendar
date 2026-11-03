@@ -15,15 +15,42 @@ var clay = new Clay(clayConfig, null, { autoHandleEvents: false });
 var CHUNK_SIZE = 2;
 var MAX_EVENTS = 48;
 var syncBusy = false;
+var activeTransfer = null;
+var transferSequence = 0;
+var detailCacheRestored = false;
+var lastWatchTransferAt = 0;
 // Duplicate sync triggers during an active fetch are ignored.
 // Pebble 'ready' and the watch's initial sync ping often overlap.
 // How many bytes a single CalendarEvent struct takes up in C (8 bytes for time + 56 bytes for title = 64)
 var BYTES_PER_EVENT = 65; 
 // How many minutes the phone will wait before bothering Google for a fresh update
 var CACHE_MINUTES = 30;
+var ACK_TIMEOUT_MS = 10000;
+var MAX_CHUNK_RETRIES = 4;
 // The URL of your deployed Google Apps Script (The Proxy)
 var PROXY_URL = 'https://script.google.com/macros/s/AKfycbx1jdy_MFdaIuR6OwV9SvaXv7_EZWHBQboY8XjLEO2xFOkAEfefh87OWKBRIzXEeuM5tg/exec';
 var latestEvents = [];
+function sourceSignature() { return JSON.stringify(getCalendarSources()); }
+function restoreDetailCache() {
+  if (localStorage.getItem('detail_cache_sources') !== sourceSignature()) return false;
+  try {
+    var restored = JSON.parse(localStorage.getItem('detail_cache_events') || 'null');
+    if (!Array.isArray(restored)) return false;
+    latestEvents = restored.slice(0, MAX_EVENTS);
+    return true;
+  } catch (err) { return false; }
+}
+function persistDetailCache(events) {
+  try {
+    localStorage.setItem('detail_cache_events', JSON.stringify(events));
+    localStorage.setItem('detail_cache_sources', sourceSignature());
+  } catch (err) { console.log('JS: Detail metadata cache unavailable'); }
+}
+function cacheIsFresh() {
+  var stamp = Number(localStorage.getItem('last_fetch_time'));
+  return stamp > 0 && Date.now() - stamp < CACHE_MINUTES * 60000;
+}
+
 
 // Encode titles as UTF-8 without splitting a multi-byte character.
 // The C CalendarEvent struct reserves 56 bytes for its null-terminated title.
@@ -158,7 +185,13 @@ function fetchIcal() {
       var limit = (watchInfo && watchInfo.platform === 'aplite') ? 20 : MAX_EVENTS;
       var selected = all.slice(0, limit);
       sendEventByteArray(selected, 0, function(success) {
-        if (success) latestEvents = selected;
+        if (success) {
+          latestEvents=selected;
+          localStorage.setItem('last_fetch_time', Date.now().toString());
+          persistDetailCache(selected);
+          detailCacheRestored=true;
+          lastWatchTransferAt=Date.now();
+        }
         finishSync(success);
       });
       return;
@@ -187,70 +220,109 @@ function fetchIcal() {
  * @param {Array} events - The full array of parsed calendar events
  * @param {number} start - The index of the array to start this specific chunk at
  */
-function sendEventByteArray(events, start, done) {
-  // Determine how many events to send in this chunk. 
-  // It's usually CHUNK_SIZE (4), unless we are at the very end of the list.
-  var count = Math.min(events.length - start, CHUNK_SIZE);
-  
-  // If we've run out of events, stop.
-  if (count <= 0 && start !== 0) { done(true); return; }
-  
-  // Create an empty chunk of memory exactly the right size for these events
+// Compact binary transfer with the same end-to-end ACK principles used by
+// VitalGuage: unique transaction ID, checksum, retry, and duplicate-packet handling.
+function chunkBytes(events, offset, count) {
   var buf = new ArrayBuffer(count * BYTES_PER_EVENT);
-  // Create a DataView to write 32-bit integers (for timestamps)
   var view = new DataView(buf);
-  // Create a Uint8Array to write individual 8-bit characters (for titles)
   var bytes = new Uint8Array(buf);
-  
-  // Loop through the events for this specific chunk
   for (var i = 0; i < count; i++) {
-    // Calculate exactly where in the memory buffer this event starts
-    var offset = i * BYTES_PER_EVENT;
-    // Grab the event object from the main array
-    var ev = events[start + i];
-    
-    // Write the start timestamp (Convert Javascript Milliseconds to Unix Seconds)
-    view.setUint32(offset, Math.floor(ev.timestampMs / 1000), true);
-    // Write the end timestamp
-    view.setUint32(offset + 4, Math.floor((ev.endTimestampMs || ev.timestampMs) / 1000), true);
-    
-    // Grab the title, or use a fallback if it's missing
-    var t = ev.title || "No Title";
-    
-    // Encode at most 55 UTF-8 bytes, leaving a null terminator.
-    encodeTitleUtf8(t, bytes, offset + 8);
-    bytes[offset + 64] = ev.calendarColor || 1;
+    var base = i * BYTES_PER_EVENT;
+    var ev = events[offset+i];
+    view.setUint32(base, Math.floor(Number(ev.timestampMs)/1000), true);
+    view.setUint32(base+4, Math.floor(Number(ev.endTimestampMs || ev.timestampMs)/1000), true);
+    encodeTitleUtf8(ev.title || 'No Title', bytes, base+8);
+    bytes[base+64] = ev.calendarColor || 1;
   }
-  
-  // Convert the Uint8Array into a standard Javascript Array of numbers so Pebble can send it
-  var arr = []; 
-  for (var j = 0; j < bytes.length; j++) arr.push(bytes[j]);
-  
-  // Package the data into a dictionary and send it to the watch
-  Pebble.sendAppMessage({
-    "TOTAL_EVENTS": events.length,                   // Let the watch know how big the total list is
-    "CHUNK_INDEX": Math.floor(start / CHUNK_SIZE),   // Let the watch know which piece of the puzzle this is (0, 1, 2...)
-    "EVENT_DATA": arr                                // The raw bytes
-  }, function() {
-    // --- SUCCESS CALLBACK ---
-    // If the watch successfully received the chunk...
-    
-    // Check if we just sent the very last piece of data
-    if (start + CHUNK_SIZE >= events.length) {
-      console.log('JS: All chunks sent successfully. Sync complete.');
-      // ONLY NOW do we update the timestamp. This prevents partial syncs from breaking the 30-minute rule.
-      localStorage.setItem('last_fetch_time', Date.now().toString());
-      done(true);
-    } else {
-      // If there are more events, call this function again, shifting the starting index forward
-      sendEventByteArray(events, start + CHUNK_SIZE, done);
+  return Array.prototype.slice.call(bytes);
+}
+function calculateChecksum(packets) {
+  var a=1,b=0;
+  for (var i=0;i<packets.length;i++) {
+    for (var j=0;j<packets[i].length;j++) {
+      a=(a+packets[i][j])%65521;
+      b=(b+a)%65521;
     }
+  }
+  return ((b*65536+a)>>>0);
+}
+function finishTransfer(transfer, ok) {
+  if (activeTransfer !== transfer) return;
+  if (transfer.timer) clearTimeout(transfer.timer);
+  activeTransfer=null;
+  transfer.done(ok);
+}
+function retryChunk(transfer, reason) {
+  if (activeTransfer !== transfer) return;
+  if (transfer.timer) clearTimeout(transfer.timer);
+  transfer.timer=null;
+  if (transfer.retries >= MAX_CHUNK_RETRIES) {
+    console.log('JS: Transfer '+transfer.id+' failed chunk '+transfer.index+': '+reason);
+    finishTransfer(transfer, false);
+    return;
+  }
+  transfer.retries++;
+  var delay=Math.min(2000, 350*Math.pow(2,transfer.retries-1));
+  console.log('JS: Retrying chunk '+transfer.index+' ('+transfer.retries+'/'+MAX_CHUNK_RETRIES+')');
+  transfer.timer=setTimeout(function() {
+    if (activeTransfer===transfer) sendChunk(transfer);
+  },delay);
+}
+function sendChunk(transfer) {
+  if (activeTransfer !== transfer) return;
+  if (transfer.timer) clearTimeout(transfer.timer);
+  var index=transfer.index;
+  var msg={
+    TOTAL_EVENTS:transfer.events.length,
+    CHUNK_INDEX:index,
+    SYNC_ID:transfer.id,
+    SYNC_CHECKSUM:transfer.checksum
+  };
+  // Pebble cannot reliably represent an empty byte-array tuple on all targets.
+  if (transfer.events.length) msg.EVENT_DATA=transfer.packets[index];
+  // Start the ACK timer BEFORE sending to avoid missing a fast watch reply.
+  transfer.timer=setTimeout(function() {
+    if (activeTransfer===transfer && transfer.index===index) retryChunk(transfer,'ACK timeout');
+  },ACK_TIMEOUT_MS);
+  Pebble.sendAppMessage(msg, function() {
+    // Bluetooth transport ACK alone is not proof that watch committed the data.
   }, function(err) {
-    // --- ERROR CALLBACK ---
-    console.log('JS: Failed to send chunk to watch. Bluetooth might be busy.');
-    done(false);
-    // If a chunk fails, the app will try again on the next launch rather than infinitely looping.
+    if (activeTransfer===transfer && transfer.index===index)
+      retryChunk(transfer,'AppMessage send failed');
   });
+}
+function sendEventByteArray(events, start, done) {
+  if (activeTransfer) { done(false); return; }
+  var packets=[];
+  if (!events.length) packets.push([]);
+  for (var offset=0;offset<events.length;offset+=CHUNK_SIZE)
+    packets.push(chunkBytes(events,offset,Math.min(CHUNK_SIZE,events.length-offset)));
+  var id=((Date.now()%2147480000) + (++transferSequence)) % 2147483647;
+  if (!id) id=1;
+  var transfer={
+    id:id, events:events, packets:packets, checksum:calculateChecksum(packets),
+    index:0, retries:0, timer:null, done:done
+  };
+  activeTransfer=transfer;
+  sendChunk(transfer);
+}
+function handleChunkAck(payload) {
+  if (!activeTransfer || payload.SYNC_ID === undefined || payload.CHUNK_ACK === undefined) return;
+  var transfer=activeTransfer;
+  if (Number(payload.SYNC_ID)!==transfer.id || Number(payload.CHUNK_ACK)!==transfer.index) {
+    console.log('JS: Ignoring stale or duplicate chunk ACK');
+    return;
+  }
+  if (transfer.timer) clearTimeout(transfer.timer);
+  transfer.timer=null;
+  transfer.index++;
+  transfer.retries=0;
+  if (transfer.index >= transfer.packets.length) {
+    console.log('JS: Watch verified all '+transfer.packets.length+' chunks, transaction '+transfer.id);
+    finishTransfer(transfer,true);
+  } else {
+    sendChunk(transfer);
+  }
 }
 
 // Keep detailed metadata on the phone rather than in the watch's event array.
@@ -297,43 +369,73 @@ function detailText(event) {
 
 // Fired the moment the app boots up on the watch
 Pebble.addEventListener('ready', function() {
-  console.log('JS: PebbleKit JS Bridge Initialized.');
-  
-  // Retrieve saved data from the phone's local storage
-  var hasCalendars = getCalendarSources().length > 0;
-  var lastFetch = localStorage.getItem('last_fetch_time');
-  var now = Date.now();
-
-  // If the user has configured an iCal URL...
-  if (hasCalendars) {
-    // Check if the cache is missing, OR if the current time minus the last fetch time is greater than 30 minutes
-    if (!lastFetch || (now - parseInt(lastFetch)) > (CACHE_MINUTES * 60000)) {
-      console.log('JS: Cache expired. Initiating background sync...');
-      fetchIcal();
-    } else {
-      // The watch has cached compact events, but the companion's detailed
-      // metadata is in RAM and must be repopulated after a phone restart.
-      fetchIcal();
-    }
+  console.log('JS: Calendar companion ready');
+  detailCacheRestored = restoreDetailCache();
+  if (getCalendarSources().length && (!cacheIsFresh() || !detailCacheRestored)) {
+    fetchIcal();
+  } else if (detailCacheRestored) {
+    console.log('JS: Valid fresh detail metadata restored without network fetch');
   }
 });
 
 // Fired when the watch specifically asks the phone for help (The "Help Signal")
 // This happens if the watch's internal storage gets wiped and it needs data IMMEDIATELY
 Pebble.addEventListener('appmessage', function(e) {
-  if (e.payload && e.payload.DETAIL_REQUEST !== undefined) {
-    var index = Number(e.payload.DETAIL_REQUEST);
-    var message = detailText(latestEvents[index]);
-    Pebble.sendAppMessage({DETAIL_TEXT: message}, function(){}, function(){});
+  var payload = (e && e.payload) || {};
+  if (payload.CHUNK_ACK !== undefined) {
+    handleChunkAck(payload);
     return;
   }
-  console.log('JS: Watch requested an emergency data sync!');
-  if (getCalendarSources().length) fetchIcal(); // Force all configured calendars
+  if (payload.DETAIL_REQUEST !== undefined) {
+    var index = Number(payload.DETAIL_REQUEST);
+    var message = detailText(latestEvents[index]);
+    Pebble.sendAppMessage({DETAIL_TEXT: message, DETAIL_TOKEN: Number(payload.DETAIL_TOKEN) || 0}, function(){},
+      function(){ console.log('JS: Details not delivered to watch'); });
+    return;
+  }
+  // Watch-side settings also update Clay's persisted phone configuration.
+  var prefNames = ['THEME_MODE','FONT_SIZE','SHOW_PAST','TIME_FORMAT','DETAIL_STATUS_BAR'];
+  if (payload.WATCH_PREFS !== undefined) {
+    var settings = {};
+    for (var i=0;i<prefNames.length;i++) {
+      var key=prefNames[i];
+      if (payload[key] !== undefined) {
+        settings[key]=String(payload[key]);
+        localStorage.setItem('watch_pref_'+key,settings[key]);
+      }
+    }
+    clay.setSettings(settings);
+    return;
+  }
+  if (payload.SYNC_COMMAND === 'refresh') {
+    console.log('JS: Manual refresh requested');
+    fetchIcal();
+  } else if (payload.SYNC_COMMAND === 'sync') {
+    if (syncBusy || activeTransfer) {
+      console.log('JS: Already synchronizing; ignoring startup request');
+      return;
+    }
+    if (cacheIsFresh() && detailCacheRestored) {
+      if (Date.now()-lastWatchTransferAt < 10000) return; // Already delivered recently.
+      console.log('JS: Restoring watch from fresh phone cache');
+      sendEventByteArray(latestEvents,0,function(ok) {
+        if (!ok) console.log('JS: Cached event transfer failed');
+        else lastWatchTransferAt=Date.now();
+      });
+    } else fetchIcal();
+  }
 });
 
 // Fired when the user taps the "Settings" gear icon in the Pebble app on their phone
 Pebble.addEventListener('showConfiguration', function() { 
   // Generate and open the Clay settings HTML page
+  // The watch may have changed preferences independently of the phone.
+  var prefs = {};
+  ['THEME_MODE','FONT_SIZE','SHOW_PAST','TIME_FORMAT','DETAIL_STATUS_BAR'].forEach(function(key){
+    var value=localStorage.getItem('watch_pref_'+key);
+    if (value !== null) prefs[key]=value;
+  });
+  clay.setSettings(prefs);
   Pebble.openURL(clay.generateUrl()); 
 });
 
@@ -344,6 +446,7 @@ Pebble.addEventListener('webviewclosed', function(e) {
   try { dict = clay.getSettings(e.response); }
   catch (err) { console.log('JS: Invalid settings response'); return; }
 
+  var beforeSources=sourceSignature();
   var keys = [messageKeys.ICAL_URL, messageKeys.ICAL_URL_2, messageKeys.ICAL_URL_3];
   for (var i = 0; i < keys.length; i++) {
     var value = dict[keys[i]];
@@ -359,16 +462,20 @@ Pebble.addEventListener('webviewclosed', function(e) {
   }
   // Avoid sending long, private ICS URLs through AppMessage.
   var watchPrefs = {};
-  if (dict[messageKeys.TIME_FORMAT] !== undefined) {
-    watchPrefs.TIME_FORMAT = dict[messageKeys.TIME_FORMAT];
-  }
-  if (dict[messageKeys.FONT_SIZE] !== undefined) {
-    watchPrefs.FONT_SIZE = String(dict[messageKeys.FONT_SIZE]);
-  }
+  ['TIME_FORMAT','FONT_SIZE','THEME_MODE','SHOW_PAST','DETAIL_STATUS_BAR'].forEach(function(key) {
+    if (dict[messageKeys[key]] !== undefined) {
+      watchPrefs[key] = String(dict[messageKeys[key]]);
+      localStorage.setItem('watch_pref_'+key, watchPrefs[key]);
+    }
+  });
   if (Object.keys(watchPrefs).length) {
     Pebble.sendAppMessage(watchPrefs, function(){},
       function(){ console.log('JS: Watch preference update failed'); });
   }
-  localStorage.removeItem('last_fetch_time');
-  fetchIcal();
+  if (beforeSources !== sourceSignature()) {
+    localStorage.removeItem('last_fetch_time');
+    localStorage.removeItem('detail_cache_events');
+    detailCacheRestored=false;
+    fetchIcal();
+  }
 });

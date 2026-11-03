@@ -144,6 +144,37 @@ module.exports = [
       },
       {
         "type": "select",
+        "messageKey": "THEME_MODE",
+        "defaultValue": "0",
+        "label": "Appearance",
+        "options": [
+          {"label": "Auto (day/night)", "value": "0"},
+          {"label": "Light", "value": "1"},
+          {"label": "Dark", "value": "2"}
+        ]
+      },
+      {
+        "type": "select",
+        "messageKey": "SHOW_PAST",
+        "defaultValue": "0",
+        "label": "Past Events",
+        "options": [
+          {"label": "Hide completed events", "value": "0"},
+          {"label": "Show all events", "value": "1"}
+        ]
+      },
+      {
+        "type": "select",
+        "messageKey": "DETAIL_STATUS_BAR",
+        "defaultValue": "0",
+        "label": "Detail Status Bar",
+        "options": [
+          {"label": "Off (more reading space)", "value": "0"},
+          {"label": "On (show current time)", "value": "1"}
+        ]
+      },
+      {
+        "type": "select",
         "messageKey": "FONT_SIZE",
         "defaultValue": "0",
         "label": "Event Font Size",
@@ -157,9 +188,13 @@ module.exports = [
       {
         "type": "select",
         "messageKey": "TIME_FORMAT",
-        "defaultValue": "12h",
+        "defaultValue": "System",
         "label": "Time Format",
         "options": [
+          {
+            "label": "System Watch Preference",
+            "value": "System"
+          },
           {
             "label": "12 Hour (AM/PM)",
             "value": "12h"

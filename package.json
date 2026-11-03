@@ -25,7 +25,16 @@
       "ICAL_COLOR_3",
       "FONT_SIZE",
       "DETAIL_REQUEST",
-      "DETAIL_TEXT"
+      "DETAIL_TEXT",
+      "SYNC_COMMAND",
+      "SYNC_ID",
+      "SYNC_CHECKSUM",
+      "CHUNK_ACK",
+      "WATCH_PREFS",
+      "THEME_MODE",
+      "SHOW_PAST",
+      "DETAIL_STATUS_BAR",
+      "DETAIL_TOKEN"
     ],
     "projectType": "native",
     "resources": {
@@ -44,8 +53,8 @@
       "watchface": false
     }
   },
-  "version": "1.7.0",
+  "version": "1.8.0",
   "scripts": {
-    "test": "node tests/utf8.test.js && node tests/multi-calendar.test.js"
+    "test": "node tests/utf8.test.js && node tests/multi-calendar.test.js && node tests/sync-protocol.test.js"
   }
 }
