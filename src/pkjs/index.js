@@ -366,43 +366,71 @@ function detailText(event) {
 
 // Fired the moment the app boots up on the watch
 Pebble.addEventListener('ready', function() {
-  console.log('JS: PebbleKit JS Bridge Initialized.');
-  
-  // Retrieve saved data from the phone's local storage
-  var hasCalendars = getCalendarSources().length > 0;
-  var lastFetch = localStorage.getItem('last_fetch_time');
-  var now = Date.now();
-
-  // If the user has configured an iCal URL...
-  if (hasCalendars) {
-    // Check if the cache is missing, OR if the current time minus the last fetch time is greater than 30 minutes
-    if (!lastFetch || (now - parseInt(lastFetch)) > (CACHE_MINUTES * 60000)) {
-      console.log('JS: Cache expired. Initiating background sync...');
-      fetchIcal();
-    } else {
-      // The watch has cached compact events, but the companion's detailed
-      // metadata is in RAM and must be repopulated after a phone restart.
-      fetchIcal();
-    }
+  console.log('JS: Calendar companion ready');
+  detailCacheRestored = restoreDetailCache();
+  if (getCalendarSources().length && (!cacheIsFresh() || !detailCacheRestored)) {
+    fetchIcal();
+  } else if (detailCacheRestored) {
+    console.log('JS: Valid fresh detail metadata restored without network fetch');
   }
 });
 
 // Fired when the watch specifically asks the phone for help (The "Help Signal")
 // This happens if the watch's internal storage gets wiped and it needs data IMMEDIATELY
 Pebble.addEventListener('appmessage', function(e) {
-  if (e.payload && e.payload.DETAIL_REQUEST !== undefined) {
-    var index = Number(e.payload.DETAIL_REQUEST);
-    var message = detailText(latestEvents[index]);
-    Pebble.sendAppMessage({DETAIL_TEXT: message}, function(){}, function(){});
+  var payload = (e && e.payload) || {};
+  if (payload.CHUNK_ACK !== undefined) {
+    handleChunkAck(payload);
     return;
   }
-  console.log('JS: Watch requested an emergency data sync!');
-  if (getCalendarSources().length) fetchIcal(); // Force all configured calendars
+  if (payload.DETAIL_REQUEST !== undefined) {
+    var index = Number(payload.DETAIL_REQUEST);
+    var message = detailText(latestEvents[index]);
+    Pebble.sendAppMessage({DETAIL_TEXT: message}, function(){},
+      function(){ console.log('JS: Details not delivered to watch'); });
+    return;
+  }
+  // Watch-side settings also update Clay's persisted phone configuration.
+  var prefNames = ['THEME_MODE','FONT_SIZE','SHOW_PAST','TIME_FORMAT','DETAIL_STATUS_BAR'];
+  if (payload.WATCH_PREFS !== undefined) {
+    var settings = {};
+    for (var i=0;i<prefNames.length;i++) {
+      var key=prefNames[i];
+      if (payload[key] !== undefined) {
+        settings[key]=String(payload[key]);
+        localStorage.setItem('watch_pref_'+key,settings[key]);
+      }
+    }
+    clay.setSettings(settings);
+    return;
+  }
+  if (payload.SYNC_COMMAND === 'refresh') {
+    console.log('JS: Manual refresh requested');
+    fetchIcal();
+  } else if (payload.SYNC_COMMAND === 'sync') {
+    if (syncBusy || activeTransfer) {
+      console.log('JS: Already synchronizing; ignoring startup request');
+      return;
+    }
+    if (cacheIsFresh() && detailCacheRestored) {
+      console.log('JS: Restoring watch from fresh phone cache');
+      sendEventByteArray(latestEvents,0,function(ok) {
+        if (!ok) console.log('JS: Cached event transfer failed');
+      });
+    } else fetchIcal();
+  }
 });
 
 // Fired when the user taps the "Settings" gear icon in the Pebble app on their phone
 Pebble.addEventListener('showConfiguration', function() { 
   // Generate and open the Clay settings HTML page
+  // The watch may have changed preferences independently of the phone.
+  var prefs = {};
+  ['THEME_MODE','FONT_SIZE','SHOW_PAST','TIME_FORMAT','DETAIL_STATUS_BAR'].forEach(function(key){
+    var value=localStorage.getItem('watch_pref_'+key);
+    if (value !== null) prefs[key]=value;
+  });
+  clay.setSettings(prefs);
   Pebble.openURL(clay.generateUrl()); 
 });
 
@@ -413,6 +441,7 @@ Pebble.addEventListener('webviewclosed', function(e) {
   try { dict = clay.getSettings(e.response); }
   catch (err) { console.log('JS: Invalid settings response'); return; }
 
+  var beforeSources=sourceSignature();
   var keys = [messageKeys.ICAL_URL, messageKeys.ICAL_URL_2, messageKeys.ICAL_URL_3];
   for (var i = 0; i < keys.length; i++) {
     var value = dict[keys[i]];
@@ -428,16 +457,20 @@ Pebble.addEventListener('webviewclosed', function(e) {
   }
   // Avoid sending long, private ICS URLs through AppMessage.
   var watchPrefs = {};
-  if (dict[messageKeys.TIME_FORMAT] !== undefined) {
-    watchPrefs.TIME_FORMAT = dict[messageKeys.TIME_FORMAT];
-  }
-  if (dict[messageKeys.FONT_SIZE] !== undefined) {
-    watchPrefs.FONT_SIZE = String(dict[messageKeys.FONT_SIZE]);
-  }
+  ['TIME_FORMAT','FONT_SIZE','THEME_MODE','SHOW_PAST','DETAIL_STATUS_BAR'].forEach(function(key) {
+    if (dict[messageKeys[key]] !== undefined) {
+      watchPrefs[key] = String(dict[messageKeys[key]]);
+      localStorage.setItem('watch_pref_'+key, watchPrefs[key]);
+    }
+  });
   if (Object.keys(watchPrefs).length) {
     Pebble.sendAppMessage(watchPrefs, function(){},
       function(){ console.log('JS: Watch preference update failed'); });
   }
-  localStorage.removeItem('last_fetch_time');
-  fetchIcal();
+  if (beforeSources !== sourceSignature()) {
+    localStorage.removeItem('last_fetch_time');
+    localStorage.removeItem('detail_cache_events');
+    detailCacheRestored=false;
+    fetchIcal();
+  }
 });
