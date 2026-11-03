@@ -71,7 +71,6 @@ static int s_restore_event_index = 0;
 static PreferredContentSize s_content_size = PreferredContentSizeMedium;
 static int s_font_mode = 0; // 0=System, 1=Small, 2=Medium, 3=Large
           // The index of the event the user clicked on
-static int s_use_24h = 0;                       // Flag: 0 for 12-hour AM/PM format, 1 for 24-hour format
 static CalendarSection s_sections[MAX_SECTIONS];
 static int s_visible_indices[MAX_EVENTS];
 static int s_visible_count = 0;
@@ -85,7 +84,8 @@ static uint32_t s_transfer_checksum = 1, s_expected_checksum = 1;
 static int s_ack_chunk = -1;
 static uint32_t s_ack_id = 0;
 static int s_ack_attempts = 0;
-static AppTimer *s_ack_timer = NULL;// Array holding the grouping data for the Menu headers
+static AppTimer *s_ack_timer = NULL;
+static AppTimer *s_sync_watchdog = NULL;// Array holding the grouping data for the Menu headers
 
 // --- Helper Functions ---
 // Muted source markers; monochrome watches use black bars.
@@ -176,7 +176,8 @@ static GColor ui_foreground(void) { return dark_mode() ? GColorWhite : GColorBla
 
 static int effective_font_mode(void) {
   if (s_font_mode >= 1 && s_font_mode <= 3) return s_font_mode;
-  return (s_content_size >= PreferredContentSizeLarge) ? 3 : 2;
+  return (s_content_size >= PreferredContentSizeLarge) ? 3 :
+         (s_content_size == PreferredContentSizeSmall) ? 1 : 2;
 }
 static int row_height(void) {
   switch (effective_font_mode()) {
@@ -485,6 +486,13 @@ static void apply_main_theme(void) {
     menu_layer_reload_data(s_settings_menu);
   }
 }
+static void sync_watchdog(void *context) {
+  s_sync_watchdog=NULL;
+  if (s_sync_in_progress && s_toast_layer) {
+    text_layer_set_text(s_toast_layer, "Sync delayed (cached)");
+    layer_set_hidden(text_layer_get_layer(s_toast_layer), false);
+  }
+}
 static void request_calendar_sync(bool force) {
   DictionaryIterator *out = NULL;
   AppMessageResult result = app_message_outbox_begin(&out);
@@ -493,6 +501,8 @@ static void request_calendar_sync(bool force) {
     result = app_message_outbox_send();
   }
   if (result == APP_MSG_OK) {
+    if (s_sync_watchdog) app_timer_cancel(s_sync_watchdog);
+    s_sync_watchdog=app_timer_register(60000,sync_watchdog,NULL);
     s_sync_in_progress = true;
     text_layer_set_text(s_toast_layer, "Syncing data...");
     layer_set_hidden(text_layer_get_layer(s_toast_layer), false);
@@ -655,6 +665,7 @@ static void retry_ack(void *context) {
   if (s_ack_chunk >= 0) send_ack(s_ack_id, s_ack_chunk);
 }
 static void ack_outbox_failed(DictionaryIterator *iter, AppMessageResult reason, void *context) {
+  if (!iter || !dict_find(iter, MESSAGE_KEY_CHUNK_ACK)) return;
   if (s_ack_chunk >= 0 && !s_ack_timer && s_ack_attempts++ < 5)
     s_ack_timer=app_timer_register(300, retry_ack, NULL);
 }
@@ -664,6 +675,7 @@ static void finish_calendar_sync(CalendarEvent *incoming, int total, uint32_t id
   s_new_data_buffer=NULL;
   s_total_expected_events=total;
   s_sync_in_progress=false;
+  if (s_sync_watchdog) { app_timer_cancel(s_sync_watchdog); s_sync_watchdog=NULL; }
   s_completed_sync_id=id;
   s_active_sync_id=0;
   s_last_sync=time(NULL);
@@ -693,6 +705,7 @@ static void inbox_handler(DictionaryIterator *iter, void *ctx) {
   if (status && status->type == TUPLE_CSTRING) {
     if (strcmp(status->value->cstring, "error") == 0) {
       s_sync_in_progress=false;
+      if (s_sync_watchdog) { app_timer_cancel(s_sync_watchdog); s_sync_watchdog=NULL; }
       text_layer_set_text(s_toast_layer, "Sync failed (cached)");
       layer_set_hidden(text_layer_get_layer(s_toast_layer), false);
       menu_layer_reload_data(s_menu_layer);
@@ -907,10 +920,15 @@ static void init() {
 
 // The cleanup function that runs right before the app exits completely
 static void deinit() {
-  window_destroy(s_main_window); // Destroy the main window
-  if (s_detail_window) window_destroy(s_detail_window); // Destroy detail window if it was left open
-  if (s_event_array) { free(s_event_array); s_event_array = NULL; } // Free active data memory
-  if (s_new_data_buffer) { free(s_new_data_buffer); s_new_data_buffer = NULL; } // Free incoming buffer memory
+  tick_timer_service_unsubscribe();
+  if (s_ack_timer) app_timer_cancel(s_ack_timer);
+  if (s_detail_timeout) app_timer_cancel(s_detail_timeout);
+  if (s_sync_watchdog) app_timer_cancel(s_sync_watchdog);
+  if (s_settings_window) window_destroy(s_settings_window);
+  if (s_detail_window) window_destroy(s_detail_window);
+  window_destroy(s_main_window);
+  if (s_event_array) free(s_event_array);
+  if (s_new_data_buffer) free(s_new_data_buffer);
 }
 
 // The standard main loop required by all C programs
