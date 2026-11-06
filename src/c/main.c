@@ -20,6 +20,9 @@
 #define PERSIST_KEY_LAST_SYNC 92
 #define PERSIST_KEY_SUNRISE 90
 #define PERSIST_KEY_SUNSET 91
+#define PERSIST_KEY_WEATHER 89
+#define FORECAST_RECORD_SIZE 7
+#define FORECAST_MAX_DAYS 7
 // Define the storage key used to save the total number of events
 #define PERSIST_KEY_COUNT 100
 // Define the storage key used to save the user's 12h/24h time format preference
@@ -42,6 +45,27 @@ typedef struct {
   int count;         // How many events fall on this specific day
   char date_text[32]; // The display text for the header (e.g., "Today", "Tomorrow")
 } CalendarSection;
+
+// Compact weather records, populated by the native Weather plugin on the phone.
+typedef struct __attribute__((__packed__)) {
+  uint32_t day_noon;
+  int8_t high;
+  int8_t low;
+  uint8_t icon;
+} DayForecast;
+static DayForecast s_forecast[FORECAST_MAX_DAYS];
+static uint8_t s_forecast_count = 0;
+
+static const DayForecast *forecast_for_date(time_t day) {
+  for (int i = 0; i < s_forecast_count; i++) {
+    time_t candidate = (time_t)s_forecast[i].day_noon;
+    struct tm a = *localtime(&candidate);
+    struct tm b = *localtime(&day);
+    if (a.tm_year == b.tm_year && a.tm_yday == b.tm_yday)
+      return &s_forecast[i];
+  }
+  return NULL;
+}
 
 // --- Global UI Variables ---
 static Window *s_main_window;           // The main application window
@@ -443,12 +467,61 @@ static int16_t get_cell_h_callback(MenuLayer *m, MenuIndex *i, void *d) {
 }
 
 // Draws the visual design of the headers (Today, Tomorrow, etc.)
-static void draw_head_callback(GContext* ctx, const Layer *l, uint16_t s, void *d) {
-  graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(GColorDukeBlue, GColorBlack)); // Set background color to dark blue
-  graphics_fill_rect(ctx, layer_get_bounds(l), 0, GCornerNone); // Draw a rectangle filling the header bounds
-  graphics_context_set_text_color(ctx, GColorWhite); // Set text color to white
-  // Draw the date text using a bold 14pt font
-  graphics_draw_text(ctx, s_sections[s].date_text, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD), GRect(5, 2, layer_get_bounds(l).size.w - 10, 20), 0, GTextAlignmentLeft, NULL);
+// Minimal glyphs keep the forecast readable on Aplite through Emery, without assets.
+static void draw_forecast_icon(GContext *ctx, GRect frame, uint8_t icon) {
+  int16_t x=frame.origin.x, y=frame.origin.y;
+  graphics_context_set_stroke_color(ctx, GColorWhite);
+  graphics_context_set_fill_color(ctx, GColorWhite);
+  bool sun=(icon==1 || icon==2);
+  bool cloud=(icon>=2 && icon<=7);
+  if (sun) {
+    GPoint center=GPoint(x+(icon==1?7:4),y+6);
+    graphics_draw_circle(ctx, center, 3);
+    graphics_draw_line(ctx,GPoint(center.x,center.y-6),GPoint(center.x,center.y-4));
+    graphics_draw_line(ctx,GPoint(center.x-6,center.y),GPoint(center.x-4,center.y));
+    graphics_draw_line(ctx,GPoint(center.x+4,center.y),GPoint(center.x+6,center.y));
+    graphics_draw_line(ctx,GPoint(center.x,center.y+4),GPoint(center.x,center.y+6));
+  }
+  if (cloud) {
+    graphics_fill_circle(ctx,GPoint(x+7,y+7),3);
+    graphics_fill_circle(ctx,GPoint(x+10,y+8),3);
+    graphics_fill_rect(ctx,GRect(x+4,y+8,11,4),0,GCornerNone);
+  }
+  if(icon==4 || icon==5 || icon==7) {
+    graphics_draw_line(ctx,GPoint(x+6,y+13),GPoint(x+4,y+16));
+    graphics_draw_line(ctx,GPoint(x+12,y+13),GPoint(x+10,y+16));
+  }
+  if(icon==6 || icon==7) {
+    graphics_draw_line(ctx,GPoint(x+9,y+13),GPoint(x+9,y+17));
+    graphics_draw_line(ctx,GPoint(x+7,y+15),GPoint(x+11,y+15));
+  }
+  if(icon==0) graphics_draw_text(ctx,"?",fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),GRect(x,y,16,19),GTextOverflowModeTrailingEllipsis,GTextAlignmentCenter,NULL);
+}
+
+static void draw_head_callback(GContext* ctx, const Layer *l, uint16_t section, void *d) {
+  GRect bounds=layer_get_bounds(l);
+  graphics_context_set_fill_color(ctx,PBL_IF_COLOR_ELSE(GColorDukeBlue,GColorBlack));
+  graphics_fill_rect(ctx,bounds,0,GCornerNone);
+  graphics_context_set_text_color(ctx,GColorWhite);
+  const DayForecast *forecast=NULL;
+  if(section<s_num_sections && s_sections[section].count>0) {
+    int index=s_visible_indices[s_sections[section].start_index];
+    time_t day=(time_t)s_event_array[index].timestamp;
+    forecast=forecast_for_date(day);
+  }
+  // Reserve the right 72 pixels for glyph and H/L; no date text overlap.
+  int16_t width=bounds.size.w;
+  graphics_draw_text(ctx,s_sections[section].date_text,
+    fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
+    GRect(5,2,forecast ? width-75 : width-10,20),
+    GTextOverflowModeTrailingEllipsis,GTextAlignmentLeft,NULL);
+  if (forecast) {
+    char temps[24];
+    snprintf(temps,sizeof(temps),"%d/%d",(int)forecast->high,(int)forecast->low);
+    draw_forecast_icon(ctx,GRect(width-71,3,17,18),forecast->icon);
+    graphics_draw_text(ctx,temps,fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
+      GRect(width-53,2,49,20),GTextOverflowModeTrailingEllipsis,GTextAlignmentRight,NULL);
+  }
 }
 
 // Draws the visual design of the individual event rows
@@ -754,6 +827,28 @@ static void inbox_handler(DictionaryIterator *iter, void *ctx) {
     }
     return;
   }
+  Tuple *weather=dict_find(iter, MESSAGE_KEY_WEATHER_FORECAST);
+  if (weather && weather->type == TUPLE_BYTE_ARRAY) {
+    if (weather->length % FORECAST_RECORD_SIZE == 0 &&
+        weather->length <= FORECAST_MAX_DAYS * FORECAST_RECORD_SIZE) {
+      uint8_t n=weather->length/FORECAST_RECORD_SIZE;
+      for (uint8_t i=0; i<n; i++) {
+        const uint8_t *data=weather->value->data+i*FORECAST_RECORD_SIZE;
+        memcpy(&s_forecast[i].day_noon,data,4);
+        s_forecast[i].high=(int8_t)data[4];
+        s_forecast[i].low=(int8_t)data[5];
+        s_forecast[i].icon=data[6];
+      }
+      s_forecast_count=n;
+      uint8_t encoded[FORECAST_MAX_DAYS*FORECAST_RECORD_SIZE];
+      if (n>0) {
+        for(uint8_t i=0;i<n;i++) memcpy(encoded+i*FORECAST_RECORD_SIZE,&s_forecast[i],FORECAST_RECORD_SIZE);
+        persist_write_data(PERSIST_KEY_WEATHER,encoded,n*FORECAST_RECORD_SIZE);
+      }
+      if (s_menu_layer) menu_layer_reload_data(s_menu_layer);
+    }
+    return;
+  }
   Tuple *rise=dict_find(iter, MESSAGE_KEY_SUNRISE_TIME);
   Tuple *set=dict_find(iter, MESSAGE_KEY_SUNSET_TIME);
   if (rise && set) {
@@ -953,6 +1048,12 @@ static void init() {
   if (persist_exists(PERSIST_KEY_TIME_MODE)) s_time_mode = persist_read_int(PERSIST_KEY_TIME_MODE);
   else if (persist_exists(PERSIST_KEY_TIME_24H)) s_time_mode = persist_read_int(PERSIST_KEY_TIME_24H) ? 2 : 1;
   if (persist_exists(PERSIST_KEY_LAST_SYNC)) s_last_sync = (time_t)persist_read_int(PERSIST_KEY_LAST_SYNC);
+  int forecast_size=persist_get_size(PERSIST_KEY_WEATHER);
+  if (forecast_size>0 && forecast_size<=FORECAST_MAX_DAYS*FORECAST_RECORD_SIZE &&
+      forecast_size%FORECAST_RECORD_SIZE==0) {
+    if(persist_read_data(PERSIST_KEY_WEATHER,s_forecast,forecast_size)==forecast_size)
+      s_forecast_count=forecast_size/FORECAST_RECORD_SIZE;
+  }
   // Load user preference for 12/24 hour time
   // Clock preferences are now controlled through s_time_mode.
   
