@@ -48,7 +48,8 @@
       "PLUGIN_CALENDAR_COLOR_9",
       "PLUGIN_CALENDAR_COLOR_10",
       "SUNRISE_TIME",
-      "SUNSET_TIME"
+      "SUNSET_TIME",
+      "WEATHER_FORECAST"
     ],
     "projectType": "native",
     "resources": {
