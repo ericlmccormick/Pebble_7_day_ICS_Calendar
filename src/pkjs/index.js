@@ -89,6 +89,33 @@ function getCalendarSources() {
   return sources;
 }
 
+// VALUE=DATE is a calendar date, not midnight in the user's timezone.
+// Some ICS proxies encode a date-only 00:00 as a UTC timestamp. Rebase
+// that UTC date onto the device's local midnight (including DST boundaries).
+function localMidnightForDateOnly(ms) {
+  var d=new Date(Number(ms));
+  if (!isFinite(d.getTime())) return ms;
+  if (d.getUTCHours()===0 && d.getUTCMinutes()===0 &&
+      d.getUTCSeconds()===0 && d.getUTCMilliseconds()===0) {
+    return new Date(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate()).getTime();
+  }
+  return ms;
+}
+function normalizeAllDayEvent(ev) {
+  if (!ev || !ev.isAllDay) return ev;
+  var start=Number(ev.timestampMs),end=Number(ev.endTimestampMs);
+  if (!isFinite(start) || start<=0) return ev;
+  var shiftedStart=localMidnightForDateOnly(start);
+  var shiftedEnd=isFinite(end) && end>0 ? localMidnightForDateOnly(end) : NaN;
+  if (!isFinite(shiftedEnd) || shiftedEnd<=shiftedStart) {
+    var d=new Date(shiftedStart);
+    shiftedEnd=new Date(d.getFullYear(),d.getMonth(),d.getDate()+1).getTime();
+  }
+  ev.timestampMs=shiftedStart;
+  ev.endTimestampMs=shiftedEnd;
+  return ev;
+}
+
 function fetchOneCalendar(url, callback) {
   var req = new XMLHttpRequest();
   var finished = false;
@@ -119,7 +146,7 @@ function fetchOneCalendar(url, callback) {
         if (ev && isFinite(Number(ev.timestampMs)) &&
             Number(ev.timestampMs) > 0 &&
             (ev.endTimestampMs === undefined || isFinite(Number(ev.endTimestampMs)))) {
-          valid.push(ev);
+          valid.push(normalizeAllDayEvent(ev));
         }
       }
       finish(null, valid);
@@ -219,7 +246,8 @@ function sendEventByteArray(events, start, done) {
     
     // Encode at most 55 UTF-8 bytes, leaving a null terminator.
     encodeTitleUtf8(t, bytes, offset + 8);
-    bytes[offset + 64] = ev.calendarColor || 1;
+    // High color-byte bit marks an all-day event. Record remains 65 bytes.
+    bytes[offset + 64] = ((Number(ev.calendarColor)||1)&0x7F) | (ev.isAllDay ? 0x80 : 0);
   }
   
   // Convert the Uint8Array into a standard Javascript Array of numbers so Pebble can send it
