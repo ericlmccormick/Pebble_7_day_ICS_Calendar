@@ -1,19 +1,19 @@
-# Pebble app-store description — 7-Day ICS Calendar v1.8
+# 7-Day Hybrid Calendar — Experimental
 
-Leave your phone in your pocket. **7-Day ICS Calendar** puts upcoming events from up to three ICS calendar feeds on your wrist in one chronological agenda, with color-coded calendar markers. Google Calendar feeds work, along with many other standard ICS feeds.
+Combine your Pebble phone's calendars with up to three optional ICS feeds in one color-coded, seven-day agenda.
 
-**Key Features**
+**Native Calendar Plugin:** Enable the built-in Calendar source to read the next **10 upcoming appointments within seven days** from calendars enabled in the Pebble mobile app. Calendar names are discovered automatically, so you can assign individual colors in the phone settings.
 
-- **App Glance:** See your next upcoming appointment in the Pebble launcher on supported watches.
-- **On-Watch Settings:** Long-press **Select** in the calendar list to open a native Settings menu. Force a sync, choose Auto/Light/Dark appearance, adjust font size, show or hide completed events, select 12/24-hour format, and toggle the detail screen's status bar.
-- **Readable Event Details:** Select an event to scroll through its date, title, location, description, organizer, and links when supplied by the calendar feed.
-- **Offline Agenda:** Titles, times, and calendar colors from your last successful sync are saved on the watch. Extra details require the connected phone.
-- **Reliable Sync:** Bounded Bluetooth transfers, transaction verification, retries, and a preserved last-good calendar if an update fails. Phone-side caching avoids unnecessary repeated downloads.
-- **Designed for Pebble:** Native list and button navigation, round-screen margins, monochrome-friendly colors, Unicode text support, and an optional time status bar.
-- **Calendar Personalization:** Three ICS sources, six available calendar-marker colors, System/Small/Medium/Large font sizes, and watch-local settings that persist across restarts.
+**Optional ICS Calendars:** Paste up to three ICS URLs, each with its own color. Leave every URL blank to run entirely on the native Calendar plugin. Disable the plugin if you prefer ICS only.
 
-**Set Up:** Open this app's Settings page in the Pebble mobile app and paste your ICS calendar link. For Google Calendar, look under calendar settings for the iCal address. Save and allow the watch to sync. Treat secret ICS links as private: the phone companion sends them to the configured Google Apps Script proxy to retrieve events.
+**Duplicate Removal:** Events with the same title (ignoring case and surrounding whitespace) are reduced to one, even if the appointments occur at different times. The earliest occurrence is kept.
 
-**Compatibility:** Aplite, Basalt, Chalk, Diorite, and Emery. App Glance is unavailable on original Aplite devices. Other/newer Pebble platforms are not yet supported by the current build.
+**Pebble Features:** Offline cached event list, App Glance on supported watches, scrollable details, Force Sync, font sizing, time format, themes, past-event filtering, and optional detail status bar.
 
-Enjoying the app? Please heart it! To help support future development: https://ko-fi.com/ericmccormick
+**Theme Auto Mode:** Uses the watch's local clock, switching to dark at 7:00 PM and back to light at 7:00 AM. This is not a solar sunrise/sunset calculation.
+
+**Important:** Plugins are still an experimental Pebble feature. The native plugin returns at most 10 events, even if more are scheduled within seven days. Additional future events require ICS feeds. Some event fields, such as descriptions, are available only from ICS, not from Pebble's current Calendar plugin. Extended event details depend on the phone.
+
+**Requirements:** Enable Plugins Preview and allow Calendar access in the Pebble mobile app. Do not publish this plugin-dependent app until Pebble's API is stable.
+
+Support development: https://ko-fi.com/ericmccormick
