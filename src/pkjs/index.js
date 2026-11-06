@@ -260,6 +260,10 @@ function pushCombinedCalendar(force) {
   // Don't overwrite good cached data with an empty result from an unavailable plugin.
   if (pluginEnabled() && pluginState==='pending') return;
   if (getCalendarSources().length && icsState==='pending') return;
+  if (pluginEnabled() && pluginState==='failed' && !getCalendarSources().length) {
+    console.log('Hybrid: Plugin unavailable with no ICS feeds; preserving last good agenda');
+    return;
+  }
   if (pluginState==='failed' && icsState!=='ready') {
     console.log('Hybrid: No usable calendar source, keeping last successful watch data');
     return;
@@ -637,6 +641,8 @@ Pebble.addEventListener('webviewclosed', function(e) {
       function(){ console.log('JS: Watch preference update failed'); });
   }
   if (wasPluginEnabled!==pluginEnabled() || oldPluginColor!==pluginColor()) {
+    lastCombinedSignature='';
+    if (oldPluginColor!==pluginColor()) pluginEvents.forEach(function(ev){ev.calendarColor=pluginColor();});
     stopPluginCalendar();
     if(pluginEnabled()) startPluginCalendar();
     else { pluginState='disabled'; scheduleCombinedSync(); }
