@@ -62,13 +62,15 @@ function scenario(withIcs) {
       calendar:{shortText:{text:'Personal'}}
     }},
     {instanceId:'two',properties:{
-      title:{longText:{text:'Plugin Only'}},
-      start:{timestamp:{value:Math.floor((now+7200000)/1000)}},
-      ends_at:{timestamp:{value:Math.floor((now+9000000)/1000)}}
+      name:{longText:{text:'Plugin Only'}},
+      starts_at:{timestamp:{value:Math.floor((now+7200000)/1000)}},
+      ends_at:{timestamp:{value:Math.floor((now+9000000)/1000)}},
+      calendar:{shortText:{text:'Work'}}
     }},
     {instanceId:'three',properties:{
-      title:{shortText:{text:' Plugin Only '}}},
-      start:{timestamp:{value:Math.floor((now+86400000)/1000)}}
+      name:{shortText:{text:' Plugin Only '}},
+      starts_at:{timestamp:{value:Math.floor((now+86400000)/1000)}},
+      calendar:{shortText:{text:'Work'}}
     }}
   ];
   subs[0].onData({instances});
