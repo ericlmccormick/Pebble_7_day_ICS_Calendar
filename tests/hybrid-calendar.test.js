@@ -51,7 +51,9 @@ function scenario(withIcs) {
   vm.createContext(ctx);
   vm.runInContext(source,ctx);
   handlers.ready();
-  assert.equal(subs.length,1,'Native calendar plugin subscribed by default');
+  assert.equal(subs.length,2,'Native Calendar and optional Weather plugins subscribed');
+  assert.equal(subs[0].category,'calendar');
+  assert.equal(subs[1].category,'weather');
   assert.equal(fetches,withIcs?1:0,'ICS only queried when configured');
   const instances=[
     {instanceId:'one',properties:{
