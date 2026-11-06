@@ -1048,7 +1048,8 @@ static void init() {
     int saved = persist_read_int(PERSIST_KEY_FONT_SIZE);
     if (saved >= 0 && saved <= 3) s_font_mode = saved;
   }
-  if (persist_exists(PERSIST_KEY_SELECTION)) s_restore_event_index = persist_read_int(PERSIST_KEY_SELECTION);
+  // New launches always start at the beginning, not the last opened event.
+  s_restore_event_index = 0;
   if (persist_exists(PERSIST_KEY_THEME)) s_theme = persist_read_int(PERSIST_KEY_THEME);
   if (persist_exists(PERSIST_KEY_SUNRISE)) s_sunrise=(time_t)persist_read_int(PERSIST_KEY_SUNRISE);
   if (persist_exists(PERSIST_KEY_SUNSET)) s_sunset=(time_t)persist_read_int(PERSIST_KEY_SUNSET);
@@ -1069,9 +1070,14 @@ static void init() {
   // Load cached calendar data from permanent storage
   if (persist_exists(PERSIST_KEY_COUNT)) load_data_from_storage();
   
-  // Push the main window onto the screen
+  // Push the main window onto the screen. Select the first visible row with
+  // top alignment so the first date header is visible above it.
   window_stack_push(s_main_window, true);
-  restore_selection();
+  if (s_num_sections > 0 && s_visible_count > 0) {
+    s_restore_event_index = s_visible_indices[0];
+    menu_layer_set_selected_index(s_menu_layer, (MenuIndex){.section=0,.row=0},
+                                  MenuRowAlignTop, false);
+  }
   
   tick_timer_service_subscribe(MINUTE_UNIT, minute_tick);
   // Register the function to listen for Bluetooth messages
