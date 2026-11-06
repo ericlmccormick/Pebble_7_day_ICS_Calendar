@@ -169,6 +169,8 @@ var pluginState='pending';
 var pluginRevision=0;
 var lastCombinedSignature='';
 var combineTimer=null;
+var pluginStartupTimer=null;
+var syncAfterCurrent=false;
 var activeIcsEvents=[];
 var icsState='pending';
 function pluginEnabled() { return localStorage.getItem('hybrid_plugin_enabled') !== 'false'; }
@@ -254,7 +256,7 @@ function scheduleCombinedSync() {
   combineTimer=setTimeout(function(){combineTimer=null;pushCombinedCalendar(false);},750);
 }
 function pushCombinedCalendar(force) {
-  if (syncBusy || activeTransfer) { scheduleCombinedSync(); return; }
+  if (syncBusy || activeTransfer) { syncAfterCurrent=true; return; }
   // Don't overwrite good cached data with an empty result from an unavailable plugin.
   if (pluginEnabled() && pluginState==='pending') return;
   if (getCalendarSources().length && icsState==='pending') return;
@@ -272,6 +274,7 @@ function pushCombinedCalendar(force) {
   syncBusy=true;
   sendEventByteArray(selected,0,function(ok) {
     syncBusy=false;
+    if (syncAfterCurrent) { syncAfterCurrent=false; scheduleCombinedSync(); }
     if(ok) {
       latestEvents=selected;
       lastCombinedSignature=sig;
@@ -332,17 +335,27 @@ function startPluginCalendar() {
   if(pluginSubscription) return;
   pluginState='pending';
   try {
+    pluginStartupTimer=setTimeout(function(){
+      pluginStartupTimer=null;
+      if(pluginState==='pending') {
+        console.log('Hybrid: Native calendar not responding; using available ICS data');
+        pluginState='failed';
+        scheduleCombinedSync();
+      }
+    },12000);
     pluginSubscription=Pebble.subscribeToSource({
       category:'calendar',item:'event',
       onData:function(envelope) {
         pluginEvents=normalizePluginEnvelope(envelope);
         pluginState='ready';
         pluginRevision++;
+        if (pluginStartupTimer) { clearTimeout(pluginStartupTimer);pluginStartupTimer=null; }
         scheduleCombinedSync();
       },
       onError:function(error) {
         console.log('Hybrid: calendar/event error: '+(error && error.code)+' '+(error && error.message));
         if(pluginState==='pending') pluginState='failed';
+        if(pluginStartupTimer) { clearTimeout(pluginStartupTimer);pluginStartupTimer=null; }
         scheduleCombinedSync();
       }
     });
@@ -352,6 +365,7 @@ function startPluginCalendar() {
   }
 }
 function stopPluginCalendar() {
+  if(pluginStartupTimer) { clearTimeout(pluginStartupTimer);pluginStartupTimer=null; }
   if(pluginSubscription && pluginSubscription.unsubscribe) pluginSubscription.unsubscribe();
   pluginSubscription=null;pluginState='disabled';pluginEvents=[];
 }
@@ -511,13 +525,11 @@ function detailText(event) {
 
 // Fired the moment the app boots up on the watch
 Pebble.addEventListener('ready', function() {
-  console.log('JS: Calendar companion ready');
-  detailCacheRestored = restoreDetailCache();
-  if (getCalendarSources().length && (!cacheIsFresh() || !detailCacheRestored)) {
-    fetchIcal();
-  } else if (detailCacheRestored) {
-    console.log('JS: Valid fresh detail metadata restored without network fetch');
-  }
+  console.log('Hybrid: Companion started');
+  detailCacheRestored=restoreDetailCache();
+  startPluginCalendar();
+  // ICS is optional: if no URL is supplied, only the plugin contributes events.
+  fetchIcal(false);
 });
 
 // Fired when the watch specifically asks the phone for help (The "Help Signal")
@@ -550,21 +562,23 @@ Pebble.addEventListener('appmessage', function(e) {
     return;
   }
   if (payload.SYNC_COMMAND === 'refresh') {
-    console.log('JS: Manual refresh requested');
-    fetchIcal();
-  } else if (payload.SYNC_COMMAND === 'sync') {
-    if (syncBusy || activeTransfer) {
-      console.log('JS: Already synchronizing; ignoring startup request');
-      return;
+    console.log('Hybrid: Manual refresh');
+    if (pluginEnabled()) {
+      stopPluginCalendar();
+      startPluginCalendar();
     }
-    if (cacheIsFresh() && detailCacheRestored) {
-      if (Date.now()-lastWatchTransferAt < 10000) return; // Already delivered recently.
-      console.log('JS: Restoring watch from fresh phone cache');
+    icsState='pending';
+    fetchIcal(true);
+  } else if (payload.SYNC_COMMAND === 'sync') {
+    if (activeTransfer || syncBusy) return;
+    if (cacheIsFresh() && detailCacheRestored && Date.now()-lastWatchTransferAt>10000) {
       sendEventByteArray(latestEvents,0,function(ok) {
-        if (!ok) console.log('JS: Cached event transfer failed');
-        else lastWatchTransferAt=Date.now();
+        if(ok) lastWatchTransferAt=Date.now();
       });
-    } else fetchIcal();
+    } else if (!detailCacheRestored) {
+      fetchIcal(false);
+      startPluginCalendar();
+    }
   }
 });
 
@@ -577,6 +591,8 @@ Pebble.addEventListener('showConfiguration', function() {
     var value=localStorage.getItem('watch_pref_'+key);
     if (value !== null) prefs[key]=value;
   });
+  prefs.PLUGIN_ENABLED=pluginEnabled()?'true':'false';
+  prefs.PLUGIN_COLOR=String(pluginColor());
   clay.setSettings(prefs);
   Pebble.openURL(clay.generateUrl()); 
 });
@@ -589,6 +605,12 @@ Pebble.addEventListener('webviewclosed', function(e) {
   catch (err) { console.log('JS: Invalid settings response'); return; }
 
   var beforeSources=sourceSignature();
+  var wasPluginEnabled=pluginEnabled();
+  var oldPluginColor=pluginColor();
+  if (dict[messageKeys.PLUGIN_ENABLED]!==undefined)
+    localStorage.setItem('hybrid_plugin_enabled',String(dict[messageKeys.PLUGIN_ENABLED])==='true'?'true':'false');
+  if (dict[messageKeys.PLUGIN_COLOR]!==undefined)
+    localStorage.setItem('hybrid_plugin_color',String(dict[messageKeys.PLUGIN_COLOR]));
   var keys = [messageKeys.ICAL_URL, messageKeys.ICAL_URL_2, messageKeys.ICAL_URL_3];
   for (var i = 0; i < keys.length; i++) {
     var value = dict[keys[i]];
@@ -614,10 +636,18 @@ Pebble.addEventListener('webviewclosed', function(e) {
     Pebble.sendAppMessage(watchPrefs, function(){},
       function(){ console.log('JS: Watch preference update failed'); });
   }
+  if (wasPluginEnabled!==pluginEnabled() || oldPluginColor!==pluginColor()) {
+    stopPluginCalendar();
+    if(pluginEnabled()) startPluginCalendar();
+    else { pluginState='disabled'; scheduleCombinedSync(); }
+  }
   if (beforeSources !== sourceSignature()) {
     localStorage.removeItem('last_fetch_time');
     localStorage.removeItem('detail_cache_events');
     detailCacheRestored=false;
-    fetchIcal();
+    icsState='pending';
+    fetchIcal(true);
+  } else if (wasPluginEnabled!==pluginEnabled() || oldPluginColor!==pluginColor()) {
+    scheduleCombinedSync();
   }
 });
