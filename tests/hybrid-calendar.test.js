@@ -53,14 +53,15 @@ function scenario(withIcs) {
   const instances=[
     {instanceId:'one',properties:{
       title:{longText:{text:'Shared'}},
-      start:{timestamp:{value:Math.floor((now+1800000)/1000)}},
-      end:{timestamp:{value:Math.floor((now+5400000)/1000)}},
-      location:{longText:{text:'Test room'}}
+      starts_at:{timestamp:{value:Math.floor((now+1800000)/1000)}},
+      ends_at:{timestamp:{value:Math.floor((now+5400000)/1000)}},
+      location:{longText:{text:'Test room'}},
+      calendar:{shortText:{text:'Personal'}}
     }},
     {instanceId:'two',properties:{
       title:{longText:{text:'Plugin Only'}},
       start:{timestamp:{value:Math.floor((now+7200000)/1000)}},
-      end:{timestamp:{value:Math.floor((now+9000000)/1000)}}
+      ends_at:{timestamp:{value:Math.floor((now+9000000)/1000)}}
     }},
     {instanceId:'three',properties:{
       title:{shortText:{text:' Plugin Only '}}},
@@ -76,6 +77,8 @@ function scenario(withIcs) {
   assert.equal(events.filter(x=>x.title.trim()==='Shared').length,1);
   assert.equal(events.filter(x=>x.title.trim()==='Plugin Only').length,1);
   assert(events.some(x=>x.location==='Test room'),'plugin location retained');
+  assert(events.some(x=>x.calendarName==='Personal'),'native calendar name retained');
+  assert(JSON.parse(storage.hybrid_calendar_names).includes('Work'),'calendar names discovered for color settings');
   assert(sent.some(x=>x.EVENT_DATA),'watch received compact event transfer');
   assert(storage.last_fetch_time,'only successful acknowledged transfer saved');
 }
