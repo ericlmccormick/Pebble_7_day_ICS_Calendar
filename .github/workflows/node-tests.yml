@@ -1,7 +1,7 @@
 name: Companion regression tests
 on:
   push:
-    branches: [main, feature/v1.8-watch-settings-and-sync]
+    branches: [main, feature/v1.8-watch-settings-and-sync, feature/hybrid-calendar-plugin]
   pull_request:
 jobs:
   node-tests:
