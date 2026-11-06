@@ -636,6 +636,33 @@ Pebble.addEventListener('appmessage', function(e) {
 });
 
 // Fired when the user taps the "Settings" gear icon in the Pebble app on their phone
+function knownCalendarNames() {
+  try {
+    var names=JSON.parse(localStorage.getItem('hybrid_calendar_names')||'[]');
+    return Array.isArray(names)?names.slice(0,10):[];
+  } catch(e) {return [];}
+}
+function buildHybridClayConfig() {
+  var cfg=JSON.parse(JSON.stringify(clayConfig));
+  var names=knownCalendarNames();
+  if (!names.length) return cfg;
+  var items=[{type:'heading',defaultValue:'Native Calendar Colors'}];
+  names.forEach(function(name,index) {
+    items.push({
+      type:'select',
+      messageKey:'PLUGIN_CALENDAR_COLOR_'+(index+1),
+      label:name,
+      defaultValue:String(colorForCalendar(name)),
+      options:[
+        {label:'Blue',value:'1'},{label:'Red',value:'2'},
+        {label:'Green',value:'3'},{label:'Yellow',value:'4'},
+        {label:'Orange',value:'5'},{label:'Purple',value:'6'}
+      ]
+    });
+  });
+  cfg.splice(2,0,{type:'section',items:items});
+  return cfg;
+}
 Pebble.addEventListener('showConfiguration', function() { 
   // Generate and open the Clay settings HTML page
   // The watch may have changed preferences independently of the phone.
@@ -646,6 +673,11 @@ Pebble.addEventListener('showConfiguration', function() {
   });
   prefs.PLUGIN_ENABLED=pluginEnabled()?'true':'false';
   prefs.PLUGIN_COLOR=String(pluginColor());
+  var names=knownCalendarNames();
+  names.forEach(function(name,i){
+    prefs['PLUGIN_CALENDAR_COLOR_'+(i+1)]=String(colorForCalendar(name));
+  });
+  clay=new Clay(buildHybridClayConfig(),null,{autoHandleEvents:false});
   clay.setSettings(prefs);
   Pebble.openURL(clay.generateUrl()); 
 });
@@ -660,6 +692,18 @@ Pebble.addEventListener('webviewclosed', function(e) {
   var beforeSources=sourceSignature();
   var wasPluginEnabled=pluginEnabled();
   var oldPluginColor=pluginColor();
+  var currentColors=calendarColorMap(),changedIndividualColors=false;
+  knownCalendarNames().forEach(function(name,index){
+    var value=Number(dict[messageKeys['PLUGIN_CALENDAR_COLOR_'+(index+1)]]);
+    if (value>=1 && value<=6 && Number(currentColors[name])!==value) {
+      currentColors[name]=value;
+      changedIndividualColors=true;
+    }
+  });
+  if (changedIndividualColors) {
+    localStorage.setItem('hybrid_calendar_color_map',JSON.stringify(currentColors));
+    pluginEvents.forEach(function(ev){ev.calendarColor=colorForCalendar(ev.calendarName||'');});
+  }
   if (dict[messageKeys.PLUGIN_ENABLED]!==undefined)
     localStorage.setItem('hybrid_plugin_enabled',String(dict[messageKeys.PLUGIN_ENABLED])==='true'?'true':'false');
   if (dict[messageKeys.PLUGIN_COLOR]!==undefined)
@@ -689,7 +733,7 @@ Pebble.addEventListener('webviewclosed', function(e) {
     Pebble.sendAppMessage(watchPrefs, function(){},
       function(){ console.log('JS: Watch preference update failed'); });
   }
-  if (wasPluginEnabled!==pluginEnabled() || oldPluginColor!==pluginColor()) {
+  if (wasPluginEnabled!==pluginEnabled() || oldPluginColor!==pluginColor() || changedIndividualColors) {
     lastCombinedSignature='';
     if (oldPluginColor!==pluginColor()) pluginEvents.forEach(function(ev){ev.calendarColor=pluginColor();});
     stopPluginCalendar();
@@ -704,7 +748,7 @@ Pebble.addEventListener('webviewclosed', function(e) {
     detailCacheRestored=false;
     icsState='pending';
     fetchIcal(true);
-  } else if (wasPluginEnabled!==pluginEnabled() || oldPluginColor!==pluginColor()) {
+  } else if (wasPluginEnabled!==pluginEnabled() || oldPluginColor!==pluginColor() || changedIndividualColors) {
     scheduleCombinedSync();
   }
 });
