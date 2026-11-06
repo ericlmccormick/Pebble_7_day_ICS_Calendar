@@ -11,6 +11,38 @@ module.exports = [
         "defaultValue": "Data Sources"
       },
       {
+        "type": "heading",
+        "defaultValue": "Native Pebble Calendar (Experimental)"
+      },
+      {
+        "type": "select",
+        "messageKey": "PLUGIN_ENABLED",
+        "label": "Use calendars provided by Pebble's native Calendar plugin",
+        "defaultValue": "true",
+        "options": [
+          {"label": "Enabled", "value": "true"},
+          {"label": "Disabled (ICS only)", "value": "false"}
+        ]
+      },
+      {
+        "type": "select",
+        "messageKey": "PLUGIN_COLOR",
+        "label": "Native Calendar event color",
+        "defaultValue": "4",
+        "options": [
+          {"label": "Blue", "value": "1"},
+          {"label": "Red", "value": "2"},
+          {"label": "Green", "value": "3"},
+          {"label": "Yellow", "value": "4"},
+          {"label": "Orange", "value": "5"},
+          {"label": "Purple", "value": "6"}
+        ]
+      },
+      {
+        "type": "heading",
+        "defaultValue": "Optional ICS Calendars (leave blank for plugin-only mode)"
+      },
+      {
         "type": "input",
         "messageKey": "ICAL_URL",
         "label": "Calendar 1 ICS URL",
