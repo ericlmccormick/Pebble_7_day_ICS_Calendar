@@ -292,8 +292,31 @@ function pushCombinedCalendar(force) {
     }
   });
 }
+function restoreIcsCache() {
+  if (localStorage.getItem('hybrid_ics_sources') !== sourceSignature()) return false;
+  var stamp=Number(localStorage.getItem('hybrid_ics_last_fetch'));
+  if (!stamp || Date.now()-stamp>=CACHE_MINUTES*60000) return false;
+  try {
+    var cached=JSON.parse(localStorage.getItem('hybrid_ics_events')||'null');
+    if (!Array.isArray(cached)) return false;
+    activeIcsEvents=cached;
+    icsState='ready';
+    return true;
+  } catch(e) { return false; }
+}
+function storeIcsCache(events) {
+  try {
+    localStorage.setItem('hybrid_ics_events',JSON.stringify(events));
+    localStorage.setItem('hybrid_ics_sources',sourceSignature());
+    localStorage.setItem('hybrid_ics_last_fetch',String(Date.now()));
+  } catch(e) { console.log('Hybrid: ICS cache unavailable'); }
+}
 function fetchIcal(force) {
   var urls=getCalendarSources();
+  if (!force && restoreIcsCache()) {
+    pushCombinedCalendar(false);
+    return;
+  }
   if (!urls.length) {
     activeIcsEvents=[];
     icsState='ready';
@@ -307,6 +330,7 @@ function fetchIcal(force) {
   function next() {
     if (index>=urls.length) {
       activeIcsEvents=all;
+      storeIcsCache(all);
       icsState='ready';
       pushCombinedCalendar(!!force);
       return;
@@ -650,6 +674,8 @@ Pebble.addEventListener('webviewclosed', function(e) {
   if (beforeSources !== sourceSignature()) {
     localStorage.removeItem('last_fetch_time');
     localStorage.removeItem('detail_cache_events');
+    localStorage.removeItem('hybrid_ics_events');
+    localStorage.removeItem('hybrid_ics_last_fetch');
     detailCacheRestored=false;
     icsState='pending';
     fetchIcal(true);
