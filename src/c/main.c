@@ -494,6 +494,15 @@ static void apply_main_theme(void) {
     dark_mode() ? GColorWhite : PBL_IF_COLOR_ELSE(GColorCyan, GColorBlack),
     dark_mode() ? GColorBlack : PBL_IF_COLOR_ELSE(GColorBlack, GColorWhite));
   menu_layer_reload_data(s_menu_layer);
+  // Update the currently open detail screen at the solar boundary too.
+  if (s_detail_meta_layer && s_detail_window) {
+    window_set_background_color(s_detail_window, ui_background());
+    text_layer_set_text_color(s_detail_time_layer, ui_foreground());
+    text_layer_set_text_color(s_detail_title_layer, ui_foreground());
+    text_layer_set_text_color(s_detail_meta_layer, ui_foreground());
+    if (s_detail_status_bar)
+      status_bar_layer_set_colors(s_detail_status_bar, ui_background(), ui_foreground());
+  }
   if (s_settings_menu) {
     window_set_background_color(s_settings_window, ui_background());
     menu_layer_set_normal_colors(s_settings_menu, ui_background(), ui_foreground());
