@@ -167,6 +167,7 @@ var pluginSubscription=null;
 var pluginEvents=[];
 var pluginState='pending';
 var pluginRevision=0;
+var lastPluginCalendarNames=[];
 var lastCombinedSignature='';
 var combineTimer=null;
 var pluginStartupTimer=null;
@@ -177,6 +178,27 @@ function pluginEnabled() { return localStorage.getItem('hybrid_plugin_enabled') 
 function pluginColor() {
   var n=Number(localStorage.getItem('hybrid_plugin_color') || '4');
   return n>=1 && n<=6 ? n : 4;
+}
+function calendarColorMap() {
+  try {
+    var value=JSON.parse(localStorage.getItem('hybrid_calendar_color_map')||'{}');
+    return value && typeof value==='object'?value:{};
+  } catch(e) {return {};}
+}
+function colorForCalendar(name) {
+  var map=calendarColorMap();
+  var color=Number(map[name]);
+  return color>=1 && color<=6?color:pluginColor();
+}
+function updateCalendarNames(events) {
+  var known={};
+  try {
+    (JSON.parse(localStorage.getItem('hybrid_calendar_names')||'[]')||[])
+      .forEach(function(name){if(name) known[String(name)]=true;});
+  } catch(e){}
+  events.forEach(function(ev){if(ev.calendarName) known[ev.calendarName]=true;});
+  lastPluginCalendarNames=Object.keys(known).sort().slice(0,10);
+  localStorage.setItem('hybrid_calendar_names',JSON.stringify(lastPluginCalendarNames));
 }
 function sameTitle(event) {
   return String(event.title || '').trim().replace(/\s+/g,' ').toLocaleLowerCase();
@@ -229,11 +251,12 @@ function normalizePluginEnvelope(envelope) {
   envelope.instances.forEach(function(instance) {
     var p=instance && instance.properties || {};
     var title=propertyValue(p,['title','summary','name']);
-    var start=propertyValue(p,['start','start_time','startTime','start_date','startDate','time','timestamp']);
-    var finish=propertyValue(p,['end','end_time','endTime','end_date','endDate']);
+    var start=propertyValue(p,['starts_at','start','start_time','startTime','start_date','startDate','time','timestamp']);
+    var finish=propertyValue(p,['ends_at','end','end_time','endTime','end_date','endDate']);
     var timestamp=timestampMs(start), end=timestampMs(finish);
     if (!isFinite(timestamp) || !title) return;
     if (!isFinite(end) || end<timestamp) end=timestamp;
+    var calendarName=String(propertyValue(p,['calendar','calendar_name'])||'');
     entries.push({
       title:String(title),timestampMs:timestamp,endTimestampMs:end,
       location:String(propertyValue(p,['location','venue'])||''),
@@ -241,7 +264,8 @@ function normalizePluginEnvelope(envelope) {
       url:String(propertyValue(p,['url','link'])||''),
       organizer:String(propertyValue(p,['organizer'])||''),
       isAllDay:!!propertyValue(p,['all_day','allDay','isAllDay']),
-      calendarColor:pluginColor(),fromPlugin:true,
+      calendarName:calendarName,
+      calendarColor:colorForCalendar(calendarName),fromPlugin:true,
       uid:String(instance.instanceId||'')
     });
   });
@@ -375,6 +399,7 @@ function startPluginCalendar() {
       category:'calendar',item:'event',
       onData:function(envelope) {
         pluginEvents=normalizePluginEnvelope(envelope);
+        updateCalendarNames(pluginEvents);
         pluginState='ready';
         pluginRevision++;
         if (pluginStartupTimer) { clearTimeout(pluginStartupTimer);pluginStartupTimer=null; }
