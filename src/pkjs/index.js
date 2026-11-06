@@ -203,9 +203,38 @@ function updateCalendarNames(events) {
 function sameTitle(event) {
   return String(event.title || '').trim().replace(/\s+/g,' ').toLocaleLowerCase();
 }
+// An ICS VALUE=DATE is a calendar date, not an instant. Some ICS proxies
+// serialize that date as 00:00 UTC, which appears at 19:00 the preceding day
+// in EST. Convert UTC-midnight date markers to the phone's local midnight.
+// Already-local-midnight timestamps are left unchanged (DST-safe).
+function localMidnightForDateOnly(ms) {
+  var d=new Date(Number(ms));
+  if (!isFinite(d.getTime())) return ms;
+  if (d.getUTCHours()===0 && d.getUTCMinutes()===0 &&
+      d.getUTCSeconds()===0 && d.getUTCMilliseconds()===0) {
+    return new Date(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate()).getTime();
+  }
+  return ms;
+}
+function normalizeAllDayEvent(ev) {
+  if (!ev || !ev.isAllDay) return ev;
+  var start=Number(ev.timestampMs),end=Number(ev.endTimestampMs);
+  if (!isFinite(start) || start<=0) return ev;
+  var shiftedStart=localMidnightForDateOnly(start);
+  var shiftedEnd=isFinite(end) && end>0 ? localMidnightForDateOnly(end) : NaN;
+  // The ICS spec uses an exclusive end date for full-day appointments.
+  // Some feeds omit it, or supply start==end. Treat that as one local day.
+  if (!isFinite(shiftedEnd) || shiftedEnd<=shiftedStart) {
+    var d=new Date(shiftedStart);
+    shiftedEnd=new Date(d.getFullYear(),d.getMonth(),d.getDate()+1).getTime();
+  }
+  ev.timestampMs=shiftedStart;
+  ev.endTimestampMs=shiftedEnd;
+  return ev;
+}
 function normalizeEventWindow(events) {
   var now=Date.now(), limit=now+7*86400000;
-  return events.filter(function(ev) {
+  return events.map(normalizeAllDayEvent).filter(function(ev) {
     var start=Number(ev.timestampMs), end=Number(ev.endTimestampMs||start);
     return !!ev.title && isFinite(start) && start>0 && start<limit &&
       isFinite(end) && end>=now && end>=start;
@@ -525,7 +554,8 @@ function chunkBytes(events, offset, count) {
     view.setUint32(base, Math.floor(Number(ev.timestampMs)/1000), true);
     view.setUint32(base+4, Math.floor(Number(ev.endTimestampMs || ev.timestampMs)/1000), true);
     encodeTitleUtf8(ev.title || 'No Title', bytes, base+8);
-    bytes[base+64] = ev.calendarColor || 1;
+    // High bit carries all-day semantics without changing the 65-byte wire format.
+    bytes[base+64] = ((Number(ev.calendarColor)||1)&0x7F) | (ev.isAllDay ? 0x80 : 0);
   }
   return Array.prototype.slice.call(bytes);
 }
