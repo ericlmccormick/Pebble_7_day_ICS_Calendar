@@ -458,7 +458,7 @@ static uint16_t get_num_rows_callback(MenuLayer *m, uint16_t s, void *d) {
 
 // Tells the MenuLayer how tall the header should be
 static int16_t get_head_h_callback(MenuLayer *m, uint16_t s, void *d) { 
-  return (s_num_sections > 0) ? 27 : 0; // Slightly taller headers for larger date and forecast typography
+  return (s_num_sections > 0) ? 28 : 0; // 22px weather icon plus 3px top/bottom clearance
 }
 
 // Tells the MenuLayer how tall each event row should be
@@ -469,33 +469,40 @@ static int16_t get_cell_h_callback(MenuLayer *m, MenuIndex *i, void *d) {
 // Draws the visual design of the headers (Today, Tomorrow, etc.)
 // Minimal glyphs keep the forecast readable on Aplite through Emery, without assets.
 static void draw_forecast_icon(GContext *ctx, GRect frame, uint8_t icon) {
+  // All glyphs are drawn within the 22x22 frame; the 28px header supplies
+  // three pixels of clearance at the top and bottom.
   int16_t x=frame.origin.x, y=frame.origin.y;
   graphics_context_set_stroke_color(ctx, GColorWhite);
   graphics_context_set_fill_color(ctx, GColorWhite);
   bool sun=(icon==1 || icon==2);
   bool cloud=(icon>=2 && icon<=7);
   if (sun) {
-    GPoint center=GPoint(x+(icon==1?7:4),y+6);
-    graphics_draw_circle(ctx, center, 3);
-    graphics_draw_line(ctx,GPoint(center.x,center.y-6),GPoint(center.x,center.y-4));
-    graphics_draw_line(ctx,GPoint(center.x-6,center.y),GPoint(center.x-4,center.y));
-    graphics_draw_line(ctx,GPoint(center.x+4,center.y),GPoint(center.x+6,center.y));
-    graphics_draw_line(ctx,GPoint(center.x,center.y+4),GPoint(center.x,center.y+6));
+    GPoint c=GPoint(x+(icon==1?11:8),y+(icon==1?11:8));
+    int16_t r=icon==1?4:3;
+    graphics_draw_circle(ctx,c,r);
+    graphics_draw_line(ctx,GPoint(c.x,c.y-r-4),GPoint(c.x,c.y-r-2));
+    graphics_draw_line(ctx,GPoint(c.x,c.y+r+2),GPoint(c.x,c.y+r+4));
+    graphics_draw_line(ctx,GPoint(c.x-r-4,c.y),GPoint(c.x-r-2,c.y));
+    graphics_draw_line(ctx,GPoint(c.x+r+2,c.y),GPoint(c.x+r+4,c.y));
+    graphics_draw_line(ctx,GPoint(c.x-r-3,c.y-r-3),GPoint(c.x-r-2,c.y-r-2));
+    graphics_draw_line(ctx,GPoint(c.x+r+2,c.y-r-2),GPoint(c.x+r+3,c.y-r-3));
+    graphics_draw_line(ctx,GPoint(c.x-r-3,c.y+r+3),GPoint(c.x-r-2,c.y+r+2));
+    graphics_draw_line(ctx,GPoint(c.x+r+2,c.y+r+2),GPoint(c.x+r+3,c.y+r+3));
   }
   if (cloud) {
-    graphics_fill_circle(ctx,GPoint(x+7,y+7),3);
-    graphics_fill_circle(ctx,GPoint(x+10,y+8),3);
-    graphics_fill_rect(ctx,GRect(x+4,y+8,11,4),0,GCornerNone);
+    graphics_fill_circle(ctx,GPoint(x+9,y+11),4);
+    graphics_fill_circle(ctx,GPoint(x+14,y+10),5);
+    graphics_fill_rect(ctx,GRect(x+4,y+11,16,5),0,GCornerNone);
   }
   if(icon==4 || icon==5 || icon==7) {
-    graphics_draw_line(ctx,GPoint(x+6,y+13),GPoint(x+4,y+16));
-    graphics_draw_line(ctx,GPoint(x+12,y+13),GPoint(x+10,y+16));
+    graphics_draw_line(ctx,GPoint(x+7,y+17),GPoint(x+5,y+20));
+    graphics_draw_line(ctx,GPoint(x+16,y+17),GPoint(x+14,y+20));
   }
   if(icon==6 || icon==7) {
-    graphics_draw_line(ctx,GPoint(x+9,y+13),GPoint(x+9,y+17));
-    graphics_draw_line(ctx,GPoint(x+7,y+15),GPoint(x+11,y+15));
+    graphics_draw_line(ctx,GPoint(x+11,y+17),GPoint(x+11,y+21));
+    graphics_draw_line(ctx,GPoint(x+9,y+19),GPoint(x+13,y+19));
   }
-  if(icon==0) graphics_draw_text(ctx,"?",fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),GRect(x,y,16,19),GTextOverflowModeTrailingEllipsis,GTextAlignmentCenter,NULL);
+  if(icon==0) graphics_draw_text(ctx,"?",fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),GRect(x,y,22,22),GTextOverflowModeTrailingEllipsis,GTextAlignmentCenter,NULL);
 }
 
 static void draw_head_callback(GContext* ctx, const Layer *l, uint16_t section, void *d) {
@@ -509,16 +516,16 @@ static void draw_head_callback(GContext* ctx, const Layer *l, uint16_t section, 
     time_t day=(time_t)s_event_array[index].timestamp;
     forecast=forecast_for_date(day);
   }
-  // Reserve the right 72 pixels for glyph and H/L; no date text overlap.
+  // Reserve space for the 22px weather glyph and high/low values.
   int16_t width=bounds.size.w;
   graphics_draw_text(ctx,s_sections[section].date_text,
     fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
-    GRect(5,2,forecast ? width-79 : width-10,24),
+    GRect(5,2,forecast ? width-86 : width-10,24),
     GTextOverflowModeTrailingEllipsis,GTextAlignmentLeft,NULL);
   if (forecast) {
     char temps[24];
     snprintf(temps,sizeof(temps),"%d/%d",(int)forecast->high,(int)forecast->low);
-    draw_forecast_icon(ctx,GRect(width-74,5,17,18),forecast->icon);
+    draw_forecast_icon(ctx,GRect(width-80,3,22,22),forecast->icon);
     graphics_draw_text(ctx,temps,fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
       GRect(width-56,2,52,24),GTextOverflowModeTrailingEllipsis,GTextAlignmentRight,NULL);
   }
