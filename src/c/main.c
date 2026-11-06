@@ -233,7 +233,7 @@ static const char *event_font(void) {
   switch (effective_font_mode()) {
     case 1: return FONT_KEY_GOTHIC_18;
     case 3: return FONT_KEY_GOTHIC_24_BOLD;
-    default: return FONT_KEY_GOTHIC_21;
+    default: return FONT_KEY_GOTHIC_18_BOLD;
   }
 }
 static const char *time_font(void) {
