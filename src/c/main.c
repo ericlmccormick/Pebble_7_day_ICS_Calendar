@@ -95,7 +95,7 @@ static AppTimer *s_pref_timer = NULL;// Array holding the grouping data for the 
 // Muted source markers; monochrome watches use black bars.
 static GColor event_color(uint8_t color) {
 #ifdef PBL_COLOR
-  switch (color) {
+  switch (color & 0x7F) {
     case 2: return GColorRed;
     case 3: return GColorGreen;
     case 4: return GColorYellow;
@@ -109,6 +109,9 @@ static GColor event_color(uint8_t color) {
 }
 
 
+
+// The top bit of the color byte is reserved for all-day events.
+static bool event_is_all_day(const CalendarEvent *event) { return event && (event->color & 0x80) != 0; }
 
 // Formats a Unix timestamp into a human-readable time string (12h or 24h)
 static void format_time(char *buffer, int buf_size, time_t timestamp) {
@@ -236,7 +239,8 @@ static void glance_callback(AppGlanceReloadSession *session, size_t limit, void 
     for (int i=0; i<s_total_expected_events; i++) {
       if ((time_t)s_event_array[i].end_timestamp < now) continue;
       char start[16];
-      format_time(start, sizeof(start), (time_t)s_event_array[i].timestamp);
+      if (event_is_all_day(&s_event_array[i])) snprintf(start, sizeof(start), "All day");
+      else format_time(start, sizeof(start), (time_t)s_event_array[i].timestamp);
       snprintf(subtitle, sizeof(subtitle), "%s %s", start, s_event_array[i].title);
       break;
     }
@@ -364,9 +368,12 @@ static void detail_load(Window *window) {
     static char when[64], begin[16], finish[16], date[20];
     time_t start = (time_t)ev->timestamp;
     strftime(date, sizeof(date), "%a, %b %d", localtime(&start));
-    format_time(begin, sizeof(begin), start);
-    format_time(finish, sizeof(finish), (time_t)ev->end_timestamp);
-    snprintf(when, sizeof(when), "%s\n%s - %s", date, begin, finish);
+    if (event_is_all_day(ev)) snprintf(when, sizeof(when), "%s\nAll day", date);
+    else {
+      format_time(begin, sizeof(begin), start);
+      format_time(finish, sizeof(finish), (time_t)ev->end_timestamp);
+      snprintf(when, sizeof(when), "%s\n%s - %s", date, begin, finish);
+    }
     text_layer_set_text(s_detail_time_layer, when);
   }
   layout_detail_content();
@@ -456,7 +463,8 @@ static void draw_row_callback(GContext* ctx, const Layer *l, MenuIndex *i, void 
   graphics_context_set_fill_color(ctx, event_color(ev.color));
   graphics_fill_rect(ctx, GRect(0, 3, 4, row_height() - 6), 0, GCornerNone);
   static char t_b[16]; 
-  format_time(t_b, 16, ev.timestamp); // Format the start time
+  if (event_is_all_day(&ev)) snprintf(t_b, sizeof(t_b), "All day");
+  else format_time(t_b, sizeof(t_b), ev.timestamp);
   
   bool highlighted = menu_cell_layer_is_highlighted(l);
   GColor selected_text = dark_mode() ? GColorBlack : PBL_IF_COLOR_ELSE(GColorBlack, GColorWhite);
