@@ -82,6 +82,6 @@
   },
   "version": "0.1.0",
   "scripts": {
-    "test": "node tests/utf8.test.js && node tests/multi-calendar.test.js && node tests/sync-protocol.test.js && node tests/hybrid-calendar.test.js"
+    "test": "node tests/utf8.test.js && node tests/multi-calendar.test.js && node tests/sync-protocol.test.js && node tests/hybrid-calendar.test.js && node tests/weather-solar.test.js"
   }
 }
