@@ -46,7 +46,9 @@
       "PLUGIN_CALENDAR_COLOR_7",
       "PLUGIN_CALENDAR_COLOR_8",
       "PLUGIN_CALENDAR_COLOR_9",
-      "PLUGIN_CALENDAR_COLOR_10"
+      "PLUGIN_CALENDAR_COLOR_10",
+      "SUNRISE_TIME",
+      "SUNSET_TIME"
     ],
     "projectType": "native",
     "resources": {
@@ -74,7 +76,8 @@
             "script.googleusercontent.com"
           ]
         }
-      }
+      },
+      "Location"
     ]
   },
   "version": "0.1.0",
