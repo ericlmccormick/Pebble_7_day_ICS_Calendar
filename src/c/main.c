@@ -231,9 +231,9 @@ static int row_height(void) {
 }
 static const char *event_font(void) {
   switch (effective_font_mode()) {
-    case 1: return FONT_KEY_GOTHIC_18_BOLD;
-    case 3: return FONT_KEY_GOTHIC_28_BOLD;
-    default: return FONT_KEY_GOTHIC_24_BOLD;
+    case 1: return FONT_KEY_GOTHIC_18;
+    case 3: return FONT_KEY_GOTHIC_24_BOLD;
+    default: return FONT_KEY_GOTHIC_21;
   }
 }
 static const char *time_font(void) {
@@ -458,7 +458,7 @@ static uint16_t get_num_rows_callback(MenuLayer *m, uint16_t s, void *d) {
 
 // Tells the MenuLayer how tall the header should be
 static int16_t get_head_h_callback(MenuLayer *m, uint16_t s, void *d) { 
-  return (s_num_sections > 0) ? 23 : 0; // Return 23 pixels if data exists, 0 if loading
+  return (s_num_sections > 0) ? 27 : 0; // Slightly taller headers for larger date and forecast typography
 }
 
 // Tells the MenuLayer how tall each event row should be
@@ -512,15 +512,15 @@ static void draw_head_callback(GContext* ctx, const Layer *l, uint16_t section, 
   // Reserve the right 72 pixels for glyph and H/L; no date text overlap.
   int16_t width=bounds.size.w;
   graphics_draw_text(ctx,s_sections[section].date_text,
-    fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
-    GRect(5,2,forecast ? width-75 : width-10,20),
+    fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
+    GRect(5,2,forecast ? width-79 : width-10,24),
     GTextOverflowModeTrailingEllipsis,GTextAlignmentLeft,NULL);
   if (forecast) {
     char temps[24];
     snprintf(temps,sizeof(temps),"%d/%d",(int)forecast->high,(int)forecast->low);
-    draw_forecast_icon(ctx,GRect(width-71,3,17,18),forecast->icon);
-    graphics_draw_text(ctx,temps,fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
-      GRect(width-53,2,49,20),GTextOverflowModeTrailingEllipsis,GTextAlignmentRight,NULL);
+    draw_forecast_icon(ctx,GRect(width-74,5,17,18),forecast->icon);
+    graphics_draw_text(ctx,temps,fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
+      GRect(width-56,2,52,24),GTextOverflowModeTrailingEllipsis,GTextAlignmentRight,NULL);
   }
 }
 
