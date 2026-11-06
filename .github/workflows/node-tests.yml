@@ -3,7 +3,43 @@ on:
   push:
     branches: [main, feature/v1.8-watch-settings-and-sync, feature/hybrid-calendar-plugin]
   pull_request:
+permissions:
+  contents: write
 jobs:
+  pbw-build:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/feature/hybrid-calendar-plugin'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Pebble build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpng-dev
+          python3 -m pip install --user --break-system-packages uv
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          ~/.local/bin/uv tool install --python 3.12 pebble-tool
+      - name: Compile Pebble watch app
+        run: |
+          pebble sdk install latest
+          pebble build
+          find build -name '*.pbw' -type f -print
+          test "$(find build -name '*.pbw' -type f | wc -l)" -eq 1
+          cp "$(find build -name '*.pbw' -type f | head -1)" 7day-hybrid-calendar.pbw
+      - name: Store PBW
+        uses: actions/upload-artifact@v4
+        with:
+          name: hybrid-calendar-pbw
+          path: 7day-hybrid-calendar.pbw
+          if-no-files-found: error
+      - name: Publish direct PBW link
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view hybrid-dev >/dev/null 2>&1; then
+            gh release upload hybrid-dev 7day-hybrid-calendar.pbw --clobber
+          else
+            gh release create hybrid-dev 7day-hybrid-calendar.pbw --prerelease --title "Hybrid Calendar development build" --notes "Experimental calendar/weather plugin app." --target "$GITHUB_SHA"
+          fi
   node-tests:
     runs-on: ubuntu-latest
     steps:
