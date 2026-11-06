@@ -417,6 +417,90 @@ function startPluginCalendar() {
     console.log('Hybrid: Could not subscribe to native calendar: '+err);
   }
 }
+// Optional native Weather plugin: sunrise/sunset are local-date-specific,
+// supplied in UTC epoch seconds, without querying an external weather API.
+// We use the first saved weather location with valid solar data.
+var weatherSubscription=null;
+var pendingSolar=null;
+var solarRetryTimer=null;
+var lastSolarSent='';
+function sameLocalDay(a,b) {
+  var x=new Date(a*1000),y=new Date(b*1000);
+  return x.getFullYear()===y.getFullYear() &&
+    x.getMonth()===y.getMonth() && x.getDate()===y.getDate();
+}
+function solarFromEnvelope(envelope) {
+  var instances=envelope && Array.isArray(envelope.instances)?envelope.instances:[];
+  var now=Math.floor(Date.now()/1000);
+  for (var i=0;i<instances.length;i++) {
+    var props=instances[i] && instances[i].properties || {};
+    var sunrise=Number(props.sunrise && props.sunrise.timestamp && props.sunrise.timestamp.value);
+    var sunset=Number(props.sunset && props.sunset.timestamp && props.sunset.timestamp.value);
+    if (isFinite(sunrise) && isFinite(sunset) && sunrise>0 &&
+        sunset>sunrise && sunset-sunrise<86400 && sameLocalDay(sunrise,now)) {
+      return {sunrise:sunrise,sunset:sunset};
+    }
+  }
+  return null;
+}
+function deliverSolarTimes() {
+  if (!pendingSolar || activeTransfer || syncBusy) {
+    if (pendingSolar && !solarRetryTimer)
+      solarRetryTimer=setTimeout(function(){solarRetryTimer=null;deliverSolarTimes();},1000);
+    return;
+  }
+  var solar=pendingSolar,key=solar.sunrise+':'+solar.sunset;
+  if (lastSolarSent===key) {pendingSolar=null;return;}
+  Pebble.sendAppMessage({SUNRISE_TIME:solar.sunrise,SUNSET_TIME:solar.sunset},
+    function() {lastSolarSent=key;pendingSolar=null;},
+    function() {
+      // A short companion AppMessage collision must not affect calendar sync.
+      if (!solarRetryTimer) solarRetryTimer=setTimeout(function(){
+        solarRetryTimer=null;deliverSolarTimes();
+      },3000);
+    });
+}
+function queueSolarTimes(solar) {
+  if (!solar) return;
+  pendingSolar=solar;
+  deliverSolarTimes();
+}
+function startWeatherPlugin() {
+  if (typeof Pebble.subscribeToSource!=='function') {
+    console.log('Hybrid: Weather plugin API unavailable; Auto uses local clock fallback');
+    return;
+  }
+  if (weatherSubscription) return;
+  try {
+    weatherSubscription=Pebble.subscribeToSource({
+      category:'weather',item:'location',
+      properties:['sunrise','sunset'],
+      onData:function(envelope) {
+        var solar=solarFromEnvelope(envelope);
+        if (solar) {
+          try {localStorage.setItem('hybrid_solar_cache',JSON.stringify(solar));}catch(e){}
+          queueSolarTimes(solar);
+        } else {
+          // A missing forecast must not replace a previously valid same-day reading.
+          console.log('Hybrid: Weather plugin has no current-day solar times; clock fallback applies');
+        }
+      },
+      onError:function(error) {
+        console.log('Hybrid: Optional Weather source unavailable: '+(error && error.message || error));
+      }
+    });
+  } catch(err) {
+    console.log('Hybrid: Weather subscription unavailable; Auto uses clock fallback: '+err);
+  }
+}
+function restoreSolarTimes() {
+  try {
+    var solar=JSON.parse(localStorage.getItem('hybrid_solar_cache')||'null');
+    if (solar && sameLocalDay(Number(solar.sunrise),Math.floor(Date.now()/1000)))
+      queueSolarTimes(solar);
+  }catch(e){}
+}
+
 function stopPluginCalendar() {
   if(pluginStartupTimer) { clearTimeout(pluginStartupTimer);pluginStartupTimer=null; }
   if(pluginSubscription && pluginSubscription.unsubscribe) pluginSubscription.unsubscribe();
@@ -581,6 +665,8 @@ Pebble.addEventListener('ready', function() {
   console.log('Hybrid: Companion started');
   detailCacheRestored=restoreDetailCache();
   startPluginCalendar();
+  restoreSolarTimes();
+  startWeatherPlugin();
   // ICS is optional: if no URL is supplied, only the plugin contributes events.
   fetchIcal(false);
 });
@@ -616,6 +702,8 @@ Pebble.addEventListener('appmessage', function(e) {
   }
   if (payload.SYNC_COMMAND === 'refresh') {
     console.log('Hybrid: Manual refresh');
+    lastSolarSent='';
+    restoreSolarTimes();
     if (pluginEnabled()) {
       stopPluginCalendar();
       startPluginCalendar();
