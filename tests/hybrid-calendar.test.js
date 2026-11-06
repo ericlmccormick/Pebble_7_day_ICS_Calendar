@@ -8,7 +8,10 @@ function scenario(withIcs) {
   const handlers={},sent=[],timers=new Map(),storage={};
   const subs=[];
   let seq=0,fetches=0;
-  if(withIcs) storage.user_ical_url_1='https://example.test/calendar.ics';
+  if(withIcs) {
+    storage.user_ical_url_1='https://example.test/calendar.ics';
+    storage.hybrid_calendar_color_map=JSON.stringify({Personal:2,Work:5});
+  }
   const localStorage={
     getItem:k=>Object.prototype.hasOwnProperty.call(storage,k)?storage[k]:null,
     setItem:(k,v)=>{storage[k]=String(v);},
@@ -78,6 +81,10 @@ function scenario(withIcs) {
   assert.equal(events.filter(x=>x.title.trim()==='Plugin Only').length,1);
   assert(events.some(x=>x.location==='Test room'),'plugin location retained');
   assert(events.some(x=>x.calendarName==='Personal'),'native calendar name retained');
+  if(withIcs) {
+    assert.equal(events.find(x=>x.calendarName==='Personal').calendarColor,2);
+    assert.equal(events.find(x=>x.calendarName==='Work').calendarColor,5);
+  }
   assert(JSON.parse(storage.hybrid_calendar_names).includes('Work'),'calendar names discovered for color settings');
   assert(sent.some(x=>x.EVENT_DATA),'watch received compact event transfer');
   assert(storage.last_fetch_time,'only successful acknowledged transfer saved');
