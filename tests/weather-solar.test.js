@@ -4,7 +4,7 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
 const source=fs.readFileSync('src/pkjs/index.js','utf8');
-const start=source.indexOf('var weatherSubscription=null;');
+const start=source.indexOf('var forecastPending=null;');
 const end=source.indexOf('function stopPluginCalendar()',start);
 assert(start>0 && end>start,'weather adapter present');
 const signals=[];
