@@ -446,6 +446,107 @@ function startPluginCalendar() {
     console.log('Hybrid: Could not subscribe to native calendar: '+err);
   }
 }
+// Daily forecast series published by the native weather/location source.
+// 7-byte records: local-noon epoch seconds (LE uint32), high/low (signed
+// integer Celsius/Fahrenheit as supplied by Pebble), condition icon enum.
+var forecastPending=null;
+var forecastLastSent='';
+var forecastTimer=null;
+function conditionIconCode(code) {
+  switch(String(code||'').toLowerCase().replace(/-/g,'_')) {
+    case 'sun': return 1;
+    case 'partly_cloudy': return 2;
+    case 'cloudy': return 3;
+    case 'light_rain': return 4;
+    case 'heavy_rain': return 5;
+    case 'light_snow': return 6;
+    case 'heavy_snow': return 6;
+    case 'rain_and_snow': return 7;
+    default: return 0;
+  }
+}
+function weatherSeries(properties,name,shape) {
+  var series=properties && properties[name] && properties[name].series;
+  if (!series || Number(series.stepSec)!==86400) return null;
+  var values=series[shape] && series[shape].values;
+  if (!Array.isArray(values) || !isFinite(Number(series.start))) return null;
+  return {start:Number(series.start),values:values,unit:series.numericValue && series.numericValue.unit};
+}
+function forecastFromEnvelope(envelope) {
+  var instances=envelope && Array.isArray(envelope.instances)?envelope.instances:[];
+  var now=Date.now(),startOfToday=new Date();
+  startOfToday.setHours(0,0,0,0);
+  for(var loc=0;loc<instances.length;loc++) {
+    var props=instances[loc] && instances[loc].properties || {};
+    var highs=weatherSeries(props,'daily_high','numericValue');
+    var lows=weatherSeries(props,'daily_low','numericValue');
+    var codes=weatherSeries(props,'daily_condition_code','longText');
+    if(!highs || !lows || !codes || highs.start!==lows.start || highs.start!==codes.start) continue;
+    var items=[],seen={};
+    for(var i=0;i<Math.min(10,highs.values.length,lows.values.length,codes.values.length);i++){
+      var h=Number(highs.values[i]),l=Number(lows.values[i]),code=codes.values[i];
+      if(highs.values[i]===null || lows.values[i]===null || code===null ||
+          !isFinite(h) || !isFinite(l) || h< -120 || h>150 || l< -120 || l>150) continue;
+      // Series start is location-local midnight in UTC seconds. Take midday
+      // to stay on the correct civil date across daylight-saving transitions.
+      var date=new Date((highs.start+i*86400+12*3600)*1000);
+      var noon=new Date(date.getFullYear(),date.getMonth(),date.getDate(),12,0,0,0);
+      var day=new Date(date.getFullYear(),date.getMonth(),date.getDate());
+      var dayKey=day.getTime();
+      if(dayKey<startOfToday.getTime() || dayKey>now+7*86400000 || seen[dayKey]) continue;
+      seen[dayKey]=true;
+      items.push({
+        dateSec:Math.floor(noon.getTime()/1000),
+        high:Math.max(-120,Math.min(120,Math.round(h))),
+        low:Math.max(-120,Math.min(120,Math.round(l))),
+        icon:conditionIconCode(code)
+      });
+    }
+    if(items.length) return items.slice(0,7);
+  }
+  return [];
+}
+function packForecast(items) {
+  var bytes=new Uint8Array(items.length*7),view=new DataView(bytes.buffer);
+  items.forEach(function(day,i) {
+    var o=i*7;
+    view.setUint32(o,day.dateSec>>>0,true);
+    view.setInt8(o+4,day.high);
+    view.setInt8(o+5,day.low);
+    view.setUint8(o+6,day.icon);
+  });
+  return Array.prototype.slice.call(bytes);
+}
+function deliverForecast() {
+  if (!forecastPending || activeTransfer || syncBusy) {
+    if(forecastPending && !forecastTimer)
+      forecastTimer=setTimeout(function(){forecastTimer=null;deliverForecast();},1000);
+    return;
+  }
+  var pending=forecastPending,signature=JSON.stringify(pending);
+  if(signature===forecastLastSent) {forecastPending=null;return;}
+  Pebble.sendAppMessage({WEATHER_FORECAST:packForecast(pending)},function(){
+    forecastLastSent=signature;
+    if(forecastPending===pending) forecastPending=null;
+  },function(){
+    if(!forecastTimer) forecastTimer=setTimeout(function(){forecastTimer=null;deliverForecast();},2500);
+  });
+}
+function queueForecast(items) {
+  if(!Array.isArray(items) || !items.length) return;
+  forecastPending=items;
+  deliverForecast();
+}
+function restoreForecast() {
+  try {
+    var stored=JSON.parse(localStorage.getItem('hybrid_forecast_cache')||'null');
+    if(stored && Array.isArray(stored.items) && Date.now()-Number(stored.savedAt)<6*3600000) {
+      var today=new Date();today.setHours(0,0,0,0);
+      var filtered=stored.items.filter(function(item){return item.dateSec*1000>=today.getTime();});
+      if(filtered.length) queueForecast(filtered);
+    }
+  } catch(e){}
+}
 // Optional native Weather plugin: sunrise/sunset are local-date-specific,
 // supplied in UTC epoch seconds, without querying an external weather API.
 // We use the first saved weather location with valid solar data.
@@ -503,8 +604,13 @@ function startWeatherPlugin() {
   try {
     weatherSubscription=Pebble.subscribeToSource({
       category:'weather',item:'location',
-      properties:['sunrise','sunset'],
+      properties:['sunrise','sunset','daily_high','daily_low','daily_condition_code'],
       onData:function(envelope) {
+        var forecast=forecastFromEnvelope(envelope);
+        if(forecast.length) {
+          try {localStorage.setItem('hybrid_forecast_cache',JSON.stringify({savedAt:Date.now(),items:forecast}));}catch(e){}
+          queueForecast(forecast);
+        }
         var solar=solarFromEnvelope(envelope);
         if (solar) {
           try {localStorage.setItem('hybrid_solar_cache',JSON.stringify(solar));}catch(e){}
@@ -696,6 +802,7 @@ Pebble.addEventListener('ready', function() {
   detailCacheRestored=restoreDetailCache();
   startPluginCalendar();
   restoreSolarTimes();
+  restoreForecast();
   startWeatherPlugin();
   // ICS is optional: if no URL is supplied, only the plugin contributes events.
   fetchIcal(false);
@@ -733,7 +840,9 @@ Pebble.addEventListener('appmessage', function(e) {
   if (payload.SYNC_COMMAND === 'refresh') {
     console.log('Hybrid: Manual refresh');
     lastSolarSent='';
+    forecastLastSent='';
     restoreSolarTimes();
+    restoreForecast();
     if (pluginEnabled()) {
       stopPluginCalendar();
       startPluginCalendar();
