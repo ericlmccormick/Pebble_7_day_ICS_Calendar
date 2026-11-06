@@ -7,7 +7,7 @@ permissions:
   contents: write
 jobs:
   pbw-build:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/feature/hybrid-calendar-plugin'
+    if: github.head_ref == 'feature/hybrid-calendar-plugin' || github.ref == 'refs/heads/feature/hybrid-calendar-plugin'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
