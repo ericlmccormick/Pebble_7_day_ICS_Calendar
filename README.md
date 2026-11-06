@@ -26,11 +26,11 @@ The plugin does **not** guarantee all events within seven days; the maximum of 1
 
 Open Pebble mobile app → 7day Hybrid Calendar → Settings. Enable/disable the native Calendar plugin and select a default color. When the plugin has supplied event data, individually discovered calendar names appear with separate color selectors. ICS 1–3 URLs remain optional, each with its own color. The watch's long-press Select menu controls Force Sync, Auto/Light/Dark appearance, font size, past-event filtering, time format, detail status bar, and last sync time.
 
-The existing **Auto** appearance is based on the watch's local time: dark at 19:00–06:59, light at 07:00–18:59. It is **not** based on sunrise/sunset. A future implementation could read sunrise/sunset timestamps from `weather/location`.
+**Auto** appearance subscribes to the built-in Weather plugin's `weather/location` source, requesting `sunrise` and `sunset` in epoch seconds. If today's valid readings are present, the watch switches at actual sunrise and sunset. The watch persists those readings and updates its appearance each minute. If Weather is unavailable, Location permission is denied, today's weather is missing, or the solar readings are from a previous local date, it falls back to dark at 19:00–06:59 and light at 07:00–18:59. In the presence of multiple Weather locations it uses the first location supplying valid current-day values, following the user's location order. Manual Light/Dark overrides always take precedence. This optional source does not trigger new weather network downloads by itself.
 
 ## Requirements and testing
 
-- The Pebble mobile app's **Plugins Preview** must be enabled for native calendar access. The app declares the `Calendar` permission. If the plugin is absent or permission is denied, configured ICS feeds can still provide data; if there are no usable sources, the watch preserves its last valid calendar.
+- The Pebble mobile app's **Plugins Preview** must be enabled for native calendar access. The app declares the `Calendar` permission and optional `Location` permission for Weather solar times. If the plugin is absent or permission is denied, configured ICS feeds can still provide data; if there are no usable sources, the watch preserves its last valid calendar.
 - Plugin access and exact schema are experimental and may change. **Do not publish this build to the Pebble Appstore** until the plugin API becomes stable.
 - `npm test` runs UTF-8, source/deduplication, transaction/retry, and plugin-only/mixed-source tests.
 - `pebble build` must still be run in a Pebble SDK/CloudPebble environment. The current branch has not been compiled on a physical watch.
