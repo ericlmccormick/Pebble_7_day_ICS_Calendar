@@ -18,10 +18,11 @@ Request.prototype.open=function(method,url){this.url=url;};
 Request.prototype.send=function(){
   requestCount++;
   this.status=200;this.readyState=4;
+  const future=Date.now()+3600000;
   this.responseText=JSON.stringify([
-    {title:'Réunion',timestampMs:1793653200000,endTimestampMs:1793656800000,location:'Office'},
-    {title:'Gym',timestampMs:1793826000000,endTimestampMs:1793829600000},
-    {title:'Meeting',timestampMs:1793883600000,endTimestampMs:1793887200000}
+    {title:'Réunion',timestampMs:future,endTimestampMs:future+3600000,location:'Office'},
+    {title:'Gym',timestampMs:future+86400000,endTimestampMs:future+90000000},
+    {title:'Meeting',timestampMs:future+172800000,endTimestampMs:future+176400000}
   ]);
   this.onreadystatechange();
 };
