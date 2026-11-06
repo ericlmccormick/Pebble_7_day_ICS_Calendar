@@ -223,10 +223,12 @@ static int effective_font_mode(void) {
          (s_content_size == PreferredContentSizeSmall) ? 1 : 2;
 }
 static int row_height(void) {
+  // Two text lines (time + title): tighten the empty space below the title,
+  // especially in Large mode, without changing the user's font selection.
   switch (effective_font_mode()) {
-    case 1: return 40;
-    case 3: return 64;
-    default: return 49;
+    case 1: return 38;
+    case 3: return 50;
+    default: return 44;
   }
 }
 static const char *event_font(void) {
