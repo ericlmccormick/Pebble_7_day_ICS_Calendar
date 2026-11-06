@@ -161,57 +161,199 @@ function fetchOneCalendar(url, callback) {
 
 // Fetch up to three feeds sequentially to limit load on phones and the proxy.
 // Commit a new combined calendar only when ALL configured feeds succeed.
-function fetchIcal() {
-  if (syncBusy) {
-    console.log('JS: Sync already running; ignoring duplicate request.');
+// This is a separate experimental hybrid app: plugin on by default,
+// existing ICS feeds optional, and explicit title-only deduplication.
+var pluginSubscription=null;
+var pluginEvents=[];
+var pluginState='pending';
+var pluginRevision=0;
+var lastCombinedSignature='';
+var combineTimer=null;
+var activeIcsEvents=[];
+var icsState='pending';
+function pluginEnabled() { return localStorage.getItem('hybrid_plugin_enabled') !== 'false'; }
+function pluginColor() {
+  var n=Number(localStorage.getItem('hybrid_plugin_color') || '4');
+  return n>=1 && n<=6 ? n : 4;
+}
+function sameTitle(event) {
+  return String(event.title || '').trim().replace(/\s+/g,' ').toLocaleLowerCase();
+}
+function normalizeEventWindow(events) {
+  var now=Date.now(), limit=now+7*86400000;
+  return events.filter(function(ev) {
+    var start=Number(ev.timestampMs), end=Number(ev.endTimestampMs||start);
+    return !!ev.title && isFinite(start) && start>0 && start<limit &&
+      isFinite(end) && end>=now && end>=start;
+  });
+}
+function dedupeByTitle(events) {
+  // Exactly as requested: two entries with the same normalized title,
+  // even if on different dates, become ONE event. Earliest wins.
+  var seen={},result=[];
+  events.sort(function(a,b){return Number(a.timestampMs)-Number(b.timestampMs) ||
+    (a.fromPlugin===b.fromPlugin?0:a.fromPlugin?-1:1);});
+  events.forEach(function(ev) {
+    var key=sameTitle(ev);
+    if (!key || Object.prototype.hasOwnProperty.call(seen,key)) return;
+    seen[key]=true;
+    result.push(ev);
+  });
+  return result;
+}
+function propertyValue(properties, names) {
+  for(var i=0;i<names.length;i++) {
+    var p=properties[names[i]];
+    if (p===undefined || p===null) continue;
+    if (typeof p==='string' || typeof p==='number') return p;
+    if (p.timestamp && p.timestamp.value!==undefined) return p.timestamp.value;
+    if (p.longText && p.longText.text!==undefined) return p.longText.text;
+    if (p.shortText && p.shortText.text!==undefined) return p.shortText.text;
+    if (p.numericValue && p.numericValue.value!==undefined) return p.numericValue.value;
+    if (p.boolean && p.boolean.value!==undefined) return p.boolean.value;
+  }
+  return undefined;
+}
+function timestampMs(raw) {
+  if (raw===undefined || raw===null || raw==='') return NaN;
+  var n=typeof raw==='number'?raw:Number(raw);
+  if (isFinite(n)) return n<100000000000?n*1000:n;
+  var t=Date.parse(String(raw));
+  return isFinite(t)?t:NaN;
+}
+function normalizePluginEnvelope(envelope) {
+  if (!envelope || !Array.isArray(envelope.instances)) return [];
+  var entries=[];
+  envelope.instances.forEach(function(instance) {
+    var p=instance && instance.properties || {};
+    var title=propertyValue(p,['title','summary','name']);
+    var start=propertyValue(p,['start','start_time','startTime','start_date','startDate','time','timestamp']);
+    var finish=propertyValue(p,['end','end_time','endTime','end_date','endDate']);
+    var timestamp=timestampMs(start), end=timestampMs(finish);
+    if (!isFinite(timestamp) || !title) return;
+    if (!isFinite(end) || end<timestamp) end=timestamp;
+    entries.push({
+      title:String(title),timestampMs:timestamp,endTimestampMs:end,
+      location:String(propertyValue(p,['location','venue'])||''),
+      description:String(propertyValue(p,['description','notes'])||''),
+      url:String(propertyValue(p,['url','link'])||''),
+      organizer:String(propertyValue(p,['organizer'])||''),
+      isAllDay:!!propertyValue(p,['all_day','allDay','isAllDay']),
+      calendarColor:pluginColor(),fromPlugin:true,
+      uid:String(instance.instanceId||'')
+    });
+  });
+  if (envelope.instances.length && !entries.length) {
+    var example=envelope.instances[0].properties||{};
+    console.log('Hybrid: Plugin calendar fields not recognized: '+Object.keys(example).join(', '));
+  }
+  return normalizeEventWindow(entries);
+}
+function scheduleCombinedSync() {
+  if (combineTimer) clearTimeout(combineTimer);
+  combineTimer=setTimeout(function(){combineTimer=null;pushCombinedCalendar(false);},750);
+}
+function pushCombinedCalendar(force) {
+  if (syncBusy || activeTransfer) { scheduleCombinedSync(); return; }
+  // Don't overwrite good cached data with an empty result from an unavailable plugin.
+  if (pluginEnabled() && pluginState==='pending') return;
+  if (getCalendarSources().length && icsState==='pending') return;
+  if (pluginState==='failed' && icsState!=='ready') {
+    console.log('Hybrid: No usable calendar source, keeping last successful watch data');
     return;
   }
-  var urls = getCalendarSources();
-  if (!urls.length) return;
-  syncBusy = true;
-  var all = [];
-  var index = 0;
-  function finishSync(success) {
-    if (!success) {
-      Pebble.sendAppMessage({SYNC_STATUS: 'error'}, function(){}, function(){});
+  var selected=dedupeByTitle(normalizeEventWindow(
+    (pluginEnabled()?pluginEvents:[]).concat(activeIcsEvents)));
+  var watchInfo=Pebble.getActiveWatchInfo?Pebble.getActiveWatchInfo():null;
+  var count=watchInfo && watchInfo.platform==='aplite'?20:MAX_EVENTS;
+  selected=selected.slice(0,count);
+  var sig=JSON.stringify(selected);
+  if (!force && sig===lastCombinedSignature) return;
+  syncBusy=true;
+  sendEventByteArray(selected,0,function(ok) {
+    syncBusy=false;
+    if(ok) {
+      latestEvents=selected;
+      lastCombinedSignature=sig;
+      persistDetailCache(selected);
+      detailCacheRestored=true;
+      lastWatchTransferAt=Date.now();
+      localStorage.setItem('last_fetch_time',String(Date.now()));
+      console.log('Hybrid: Synced '+selected.length+' unique event titles');
+    } else {
+      Pebble.sendAppMessage({SYNC_STATUS:'error'},function(){},function(){});
     }
-    syncBusy = false;
-
+  });
+}
+function fetchIcal(force) {
+  var urls=getCalendarSources();
+  if (!urls.length) {
+    activeIcsEvents=[];
+    icsState='ready';
+    pushCombinedCalendar(!!force);
+    return;
   }
+  // ICS-only refresh; plugin updates are handled independently.
+  if (icsState==='loading') return;
+  icsState='loading';
+  var all=[],index=0;
   function next() {
-    if (index >= urls.length) {
-      all.sort(function(a, b) { return Number(a.timestampMs) - Number(b.timestampMs); });
-      var watchInfo = Pebble.getActiveWatchInfo ? Pebble.getActiveWatchInfo() : null;
-      var limit = (watchInfo && watchInfo.platform === 'aplite') ? 20 : MAX_EVENTS;
-      var selected = all.slice(0, limit);
-      sendEventByteArray(selected, 0, function(success) {
-        if (success) {
-          latestEvents=selected;
-          localStorage.setItem('last_fetch_time', Date.now().toString());
-          persistDetailCache(selected);
-          detailCacheRestored=true;
-          lastWatchTransferAt=Date.now();
-        }
-        finishSync(success);
-      });
+    if (index>=urls.length) {
+      activeIcsEvents=all;
+      icsState='ready';
+      pushCombinedCalendar(!!force);
       return;
     }
-    var feedNumber = ++index;
-    var source = urls[feedNumber - 1];
-    fetchOneCalendar(source.url, function(err, events) {
+    var source=urls[index++];
+    fetchOneCalendar(source.url,function(err,events) {
       if (err) {
-        console.log('JS: Calendar ' + feedNumber + ' failed: ' + err);
-        finishSync(false);
+        console.log('Hybrid: ICS '+index+' failed: '+err);
+        icsState='failed';
+        if (pluginEnabled() && pluginState==='ready') pushCombinedCalendar(!!force);
+        else Pebble.sendAppMessage({SYNC_STATUS:'error'},function(){},function(){});
         return;
       }
-      for (var i = 0; i < events.length; i++) {
-        events[i].calendarColor = source.color;
-        all.push(events[i]);
-      }
+      events.forEach(function(ev){ev.calendarColor=source.color;all.push(ev);});
       next();
     });
   }
   next();
+}
+function startPluginCalendar() {
+  if (!pluginEnabled()) {
+    pluginState='disabled';pluginEvents=[];
+    return;
+  }
+  if (typeof Pebble.subscribeToSource!=='function') {
+    pluginState='failed';
+    console.log('Hybrid: Plugin API unavailable. Enable Plugins Preview in Pebble mobile Settings.');
+    return;
+  }
+  if(pluginSubscription) return;
+  pluginState='pending';
+  try {
+    pluginSubscription=Pebble.subscribeToSource({
+      category:'calendar',item:'event',
+      onData:function(envelope) {
+        pluginEvents=normalizePluginEnvelope(envelope);
+        pluginState='ready';
+        pluginRevision++;
+        scheduleCombinedSync();
+      },
+      onError:function(error) {
+        console.log('Hybrid: calendar/event error: '+(error && error.code)+' '+(error && error.message));
+        if(pluginState==='pending') pluginState='failed';
+        scheduleCombinedSync();
+      }
+    });
+  } catch(err) {
+    pluginState='failed';
+    console.log('Hybrid: Could not subscribe to native calendar: '+err);
+  }
+}
+function stopPluginCalendar() {
+  if(pluginSubscription && pluginSubscription.unsubscribe) pluginSubscription.unsubscribe();
+  pluginSubscription=null;pluginState='disabled';pluginEvents=[];
 }
 
 /**
