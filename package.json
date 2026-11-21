@@ -11,6 +11,15 @@
     ],
     "displayName": "7day ICS Calendar",
     "enableMultiJS": true,
+    "manifestVersion": 2,
+    "usesPermissions": [
+      {
+        "name": "Internet",
+        "parameters": {"domains": ["script.google.com", "script.googleusercontent.com"]},
+        "reason": "Sync your calendar feeds",
+        "required": true
+      }
+    ],
     "messageKeys": [
       "TOTAL_EVENTS",
       "CHUNK_INDEX",
@@ -44,8 +53,8 @@
       "watchface": false
     }
   },
-  "version": "1.7.0",
+  "version": "1.8.0",
   "scripts": {
-    "test": "node tests/utf8.test.js && node tests/multi-calendar.test.js"
+    "test": "node tests/utf8.test.js && node tests/multi-calendar.test.js && node tests/all-day.test.js"
   }
 }

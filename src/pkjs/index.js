@@ -159,34 +159,41 @@ function fetchOneCalendar(url, callback) {
   try { req.send(null); } catch (e) { finish('Request failed'); }
 }
 
-// Fetch up to three feeds sequentially to limit load on phones and the proxy.
-// Commit a new combined calendar only when ALL configured feeds succeed.
+// Refresh feeds independently and keep the last good data for a timed-out feed.
 function fetchIcal() {
-  if (syncBusy) {
-    console.log('JS: Sync already running; ignoring duplicate request.');
-    return;
-  }
+  if (syncBusy) return;
   var urls = getCalendarSources();
   if (!urls.length) return;
   syncBusy = true;
   var all = [];
+  var failed = [];
+  var succeeded = 0;
   var index = 0;
-  function finishSync(success) {
-    if (!success) {
-      Pebble.sendAppMessage({SYNC_STATUS: 'error'}, function(){}, function(){});
-    }
-    syncBusy = false;
+  var cache;
+  try { cache = JSON.parse(localStorage.getItem('calendar_feed_cache') || '{}') || {}; }
+  catch (e) { cache = {}; }
+  var nextCache = {};
 
+  function finishSync(status) {
+    if (status) Pebble.sendAppMessage({SYNC_STATUS: status}, function(){}, function(){});
+    syncBusy = false;
   }
+
   function next() {
-    if (index >= urls.length) {
+    if (index === urls.length) {
+      try { localStorage.setItem('calendar_feed_cache', JSON.stringify(nextCache)); }
+      catch (e) { console.log('JS: Unable to save feed cache'); }
+      if (!succeeded) {
+        finishSync('error');
+        return;
+      }
       all.sort(function(a, b) { return Number(a.timestampMs) - Number(b.timestampMs); });
       var watchInfo = Pebble.getActiveWatchInfo ? Pebble.getActiveWatchInfo() : null;
       var limit = (watchInfo && watchInfo.platform === 'aplite') ? 20 : MAX_EVENTS;
       var selected = all.slice(0, limit);
       sendEventByteArray(selected, 0, function(success) {
         if (success) latestEvents = selected;
-        finishSync(success);
+        finishSync(!success ? 'error' : failed.length ? 'Stale: ' + failed.join(', ') : null);
       });
       return;
     }
@@ -194,14 +201,26 @@ function fetchIcal() {
     var source = urls[feedNumber - 1];
     fetchOneCalendar(source.url, function(err, events) {
       if (err) {
+        failed.push(feedNumber);
         console.log('JS: Calendar ' + feedNumber + ' failed: ' + err);
-        finishSync(false);
-        return;
+        events = Array.isArray(cache[source.url]) ? cache[source.url] : [];
+      } else {
+        ++succeeded;
       }
-      for (var i = 0; i < events.length; i++) {
-        events[i].calendarColor = source.color;
-        all.push(events[i]);
-      }
+      // Keep the cache bounded and omit events that have already ended.
+      var now = Date.now();
+      var cutoff = now + 8 * 86400000;
+      if (err) events = events.filter(function(ev) {
+        return Number(ev.timestampMs) < cutoff &&
+          Number(ev.endTimestampMs || ev.timestampMs) >= now;
+      });
+      nextCache[source.url] = events.slice().sort(function(a,b) {
+        return Number(a.timestampMs) - Number(b.timestampMs);
+      }).slice(0, MAX_EVENTS);
+      events.forEach(function(event) {
+        event.calendarColor = source.color;
+        all.push(event);
+      });
       next();
     });
   }

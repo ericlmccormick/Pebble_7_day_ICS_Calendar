@@ -153,9 +153,9 @@ static int effective_font_mode(void) {
 }
 static int row_height(void) {
   switch (effective_font_mode()) {
-    case 1: return 40;
+    case 1: return 45;
     case 3: return 64;
-    default: return 49;
+    default: return 51;
   }
 }
 static const char *event_font(void) {
@@ -264,13 +264,24 @@ static void load_data_from_storage() {
 
 // Sets up the UI elements when the Detail Window is opened
 // Measure text with its final width, then stack the layers without overlap.
+// Keep scrollable content inside the round display at every scroll offset.
+static GRect agenda_viewport(GRect screen) {
+#ifdef PBL_ROUND
+  int x = screen.size.w * 12 / 100;
+  int y = screen.size.h * 19 / 100;
+  return GRect(x, y, screen.size.w - 2 * x, screen.size.h - 2 * y);
+#else
+  return screen;
+#endif
+}
+
 static void layout_detail_content(void) {
   if (!s_detail_scroll_layer || !s_detail_time_layer ||
       !s_detail_title_layer || !s_detail_meta_layer) return;
-  GRect bounds = layer_get_bounds(window_get_root_layer(s_detail_window));
-  int margin = PBL_IF_ROUND_ELSE(22, 10);
+  GRect bounds = layer_get_bounds(scroll_layer_get_layer(s_detail_scroll_layer));
+  int margin = PBL_IF_ROUND_ELSE(5, 10);
   int width = bounds.size.w - 2 * margin;
-  int y = PBL_IF_ROUND_ELSE(22, 8);
+  int y = PBL_IF_ROUND_ELSE(4, 8);
   TextLayer *layers[] = {s_detail_time_layer, s_detail_title_layer, s_detail_meta_layer};
   for (int i = 0; i < 3; i++) {
     // This generous temporary height prevents measurement from clipping lines.
@@ -280,7 +291,7 @@ static void layout_detail_content(void) {
     layer_set_frame(text_layer_get_layer(layers[i]), GRect(margin, y, width, height));
     y += height + (i == 0 ? 12 : 10);
   }
-  y += PBL_IF_ROUND_ELSE(22, 12);
+  y += 12;
   if (y < bounds.size.h) y = bounds.size.h;
   scroll_layer_set_content_size(s_detail_scroll_layer, GSize(bounds.size.w, y));
 }
@@ -288,7 +299,10 @@ static void detail_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   GRect bounds = layer_get_bounds(root);
   window_set_background_color(window, GColorWhite);
-  s_detail_scroll_layer = scroll_layer_create(bounds);
+  s_detail_scroll_layer = scroll_layer_create(agenda_viewport(bounds));
+#ifdef PBL_ROUND
+  scroll_layer_set_shadow_hidden(s_detail_scroll_layer, true);
+#endif
   scroll_layer_set_click_config_onto_window(s_detail_scroll_layer, window);
   layer_add_child(root, scroll_layer_get_layer(s_detail_scroll_layer));
   const int font = effective_font_mode();
@@ -312,7 +326,9 @@ static void detail_load(Window *window) {
   scroll_layer_add_child(s_detail_scroll_layer, text_layer_get_layer(s_detail_meta_layer));
   if (s_event_array && s_selected_event_index < s_total_expected_events) {
     CalendarEvent *ev = &s_event_array[s_selected_event_index];
-    text_layer_set_text(s_detail_title_layer, ev->title);
+    static char title[sizeof(ev->title)];
+    snprintf(title, sizeof(title), "%s", ev->title);
+    text_layer_set_text(s_detail_title_layer, title);
     static char when[64], begin[16], finish[16], date[20];
     time_t start = (time_t)ev->timestamp;
     strftime(date, sizeof(date), "%a, %b %d", localtime(&start));
@@ -396,6 +412,7 @@ static void draw_row_callback(GContext* ctx, const Layer *l, MenuIndex *i, void 
   CalendarEvent ev = s_event_array[s_sections[i->section].start_index + i->row];
   graphics_context_set_fill_color(ctx, event_color(ev.color));
   graphics_fill_rect(ctx, GRect(0, 3, 4, row_height() - 6), 0, GCornerNone);
+  const int title_y = 20;
   static char t_b[16]; 
   if (event_is_all_day(&ev)) snprintf(t_b, sizeof(t_b), "All day");
   else format_time(t_b, sizeof(t_b), ev.timestamp);
@@ -406,7 +423,7 @@ static void draw_row_callback(GContext* ctx, const Layer *l, MenuIndex *i, void 
   // Draw the time text in the top half of the row
   graphics_draw_text(ctx, t_b, fonts_get_system_font(time_font()), GRect(9, 0, layer_get_bounds(l).size.w - 14, 20), 0, GTextAlignmentLeft, NULL);
   // Respect the user's system text size.
-  graphics_draw_text(ctx, ev.title, fonts_get_system_font(event_font()), GRect(9, 16, layer_get_bounds(l).size.w - 14, row_height() - 17), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  graphics_draw_text(ctx, ev.title, fonts_get_system_font(event_font()), GRect(9, title_y, layer_get_bounds(l).size.w - 14, row_height() - title_y), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 }
 
 // Handles what happens when the user clicks the "Select" (middle) button on a row
@@ -434,6 +451,8 @@ static void select_long_click_callback(MenuLayer *m, MenuIndex *i, void *d) {
 // --- Communications ---
 
 // Handles all incoming messages from the phone (JavaScript)
+static char s_sync_message[32];
+
 static void inbox_handler(DictionaryIterator *iter, void *ctx) {
   
   Tuple *detail = dict_find(iter, MESSAGE_KEY_DETAIL_TEXT);
@@ -446,9 +465,12 @@ static void inbox_handler(DictionaryIterator *iter, void *ctx) {
     return;
   }
   Tuple *status = dict_find(iter, MESSAGE_KEY_SYNC_STATUS);
-  if (status && status->type == TUPLE_CSTRING && strcmp(status->value->cstring, "error") == 0) {
+  if (status && status->type == TUPLE_CSTRING) {
     s_sync_in_progress = false;
-    text_layer_set_text(s_toast_layer, "Sync failed");
+    const char *message = status->value->cstring;
+    snprintf(s_sync_message, sizeof(s_sync_message), "%s",
+             strcmp(message, "error") == 0 ? "Sync failed" : message);
+    text_layer_set_text(s_toast_layer, s_sync_message);
     layer_set_hidden(text_layer_get_layer(s_toast_layer), false);
     menu_layer_reload_data(s_menu_layer);
     return;
@@ -544,7 +566,11 @@ static void main_load(Window *window) {
   GRect bounds = layer_get_frame(window_layer); // Get screen dimensions
   
   // Create and configure the MenuLayer (The scrolling list)
-  s_menu_layer = menu_layer_create(bounds);
+  s_menu_layer = menu_layer_create(agenda_viewport(bounds));
+#ifdef PBL_ROUND
+  menu_layer_set_center_focused(s_menu_layer, true);
+  scroll_layer_set_shadow_hidden(menu_layer_get_scroll_layer(s_menu_layer), true);
+#endif
   menu_layer_set_normal_colors(s_menu_layer, GColorWhite, GColorBlack); // White background, Black text
   menu_layer_set_highlight_colors(s_menu_layer, PBL_IF_COLOR_ELSE(GColorCyan, GColorBlack), PBL_IF_COLOR_ELSE(GColorBlack, GColorWhite)); // Cyan highlight, Black text
 
@@ -565,11 +591,15 @@ static void main_load(Window *window) {
   layer_add_child(window_layer, menu_layer_get_layer(s_menu_layer));
 
   // Create and configure the Notification Toast Layer (Positioned at the very bottom)
+#ifdef PBL_ROUND
+  s_toast_layer = text_layer_create(GRect(bounds.size.w / 5, bounds.size.h - 41, bounds.size.w * 3 / 5, 21));
+#else
   s_toast_layer = text_layer_create(GRect(0, bounds.size.h - 24, bounds.size.w, 24));
+#endif
   text_layer_set_background_color(s_toast_layer, GColorBlack); // Black background
   text_layer_set_text_color(s_toast_layer, GColorWhite); // White text
   text_layer_set_text_alignment(s_toast_layer, GTextAlignmentCenter); // Center the text
-  text_layer_set_font(s_toast_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD)); // Bold font
+  text_layer_set_font(s_toast_layer, fonts_get_system_font(PBL_IF_ROUND_ELSE(FONT_KEY_GOTHIC_14_BOLD, FONT_KEY_GOTHIC_18_BOLD))); // Bold font
   text_layer_set_text(s_toast_layer, "Syncing data..."); // Set the text message
   
   // Make the layer invisible by default (It will only show during a sync)
