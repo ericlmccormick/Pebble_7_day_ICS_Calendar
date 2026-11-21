@@ -1,6 +1,6 @@
 # 7day ICS Calendar
 
-**Current source version:** 1.8.0. A configurable seven-day ICS calendar for Pebble watches. This is independent of [Next Up Agenda](https://github.com/ericlmccormick/Next-Up-Agenda), which gets events from the native Pebble Calendar plugin instead of ICS URLs.
+**Current source version:** 1.9.0. A configurable seven-day ICS calendar for Pebble watches. This is independent of [Next Up Agenda](https://github.com/ericlmccormick/Next-Up-Agenda), which gets events from the native Pebble Calendar plugin instead of ICS URLs.
 
 ## Setup
 
