@@ -434,6 +434,8 @@ static void select_long_click_callback(MenuLayer *m, MenuIndex *i, void *d) {
 // --- Communications ---
 
 // Handles all incoming messages from the phone (JavaScript)
+static char s_sync_message[32];
+
 static void inbox_handler(DictionaryIterator *iter, void *ctx) {
   
   Tuple *detail = dict_find(iter, MESSAGE_KEY_DETAIL_TEXT);
@@ -446,9 +448,12 @@ static void inbox_handler(DictionaryIterator *iter, void *ctx) {
     return;
   }
   Tuple *status = dict_find(iter, MESSAGE_KEY_SYNC_STATUS);
-  if (status && status->type == TUPLE_CSTRING && strcmp(status->value->cstring, "error") == 0) {
+  if (status && status->type == TUPLE_CSTRING) {
     s_sync_in_progress = false;
-    text_layer_set_text(s_toast_layer, "Sync failed");
+    const char *message = status->value->cstring;
+    snprintf(s_sync_message, sizeof(s_sync_message), "%s",
+             strcmp(message, "error") == 0 ? "Sync failed" : message);
+    text_layer_set_text(s_toast_layer, s_sync_message);
     layer_set_hidden(text_layer_get_layer(s_toast_layer), false);
     menu_layer_reload_data(s_menu_layer);
     return;
