@@ -1,5 +1,6 @@
 // Include the standard Pebble SDK library for watchface and app development
 #include <pebble.h>
+#include "solar_theme.h"
 
 // --- Configuration Constants ---
 // Define the maximum length for a calendar event title string (55 characters + 1 null terminator)
@@ -63,6 +64,35 @@ static int s_font_mode = 0; // 0=System, 1=Small, 2=Medium, 3=Large
 static int s_use_24h = 0;                       // Flag: 0 for 12-hour AM/PM format, 1 for 24-hour format
 static CalendarSection s_sections[MAX_SECTIONS];// Array holding the grouping data for the Menu headers
 
+#define PERSIST_KEY_THEME_MODE 437
+static VGThemeMode s_theme_mode = VG_THEME_DAY;
+static bool s_dark;
+static GColor theme_background(void) { return s_dark ? GColorBlack : GColorWhite; }
+static GColor theme_foreground(void) { return s_dark ? GColorWhite : GColorBlack; }
+static GColor theme_highlight_background(void) {
+  return s_dark ? GColorWhite : PBL_IF_COLOR_ELSE(GColorCyan, GColorBlack);
+}
+static GColor theme_highlight_foreground(void) {
+  return s_dark ? GColorBlack : PBL_IF_COLOR_ELSE(GColorBlack, GColorWhite);
+}
+static void apply_theme(void) {
+  s_dark = solar_theme_dark(s_theme_mode);
+  if (s_main_window) window_set_background_color(s_main_window, theme_background());
+  if (s_menu_layer) {
+    menu_layer_set_normal_colors(s_menu_layer, theme_background(), theme_foreground());
+    menu_layer_set_highlight_colors(s_menu_layer, theme_highlight_background(), theme_highlight_foreground());
+  }
+  if (s_detail_window && s_detail_time_layer) {
+    window_set_background_color(s_detail_window, theme_background());
+    text_layer_set_text_color(s_detail_time_layer, theme_foreground());
+    text_layer_set_text_color(s_detail_title_layer, theme_foreground());
+    text_layer_set_text_color(s_detail_meta_layer, theme_foreground());
+  }
+}
+static void appearance_tick(struct tm *local, TimeUnits units) {
+  if (s_dark != solar_theme_dark(s_theme_mode)) apply_theme();
+}
+
 // --- Helper Functions ---
 // Muted source markers; monochrome watches use black bars.
 static GColor event_color(uint8_t color) {
@@ -76,7 +106,7 @@ static GColor event_color(uint8_t color) {
     default: return GColorBlue;
   }
 #else
-  return GColorBlack;
+  return theme_foreground();
 #endif
 }
 
@@ -298,7 +328,7 @@ static void layout_detail_content(void) {
 static void detail_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   GRect bounds = layer_get_bounds(root);
-  window_set_background_color(window, GColorWhite);
+  window_set_background_color(window, theme_background());
   s_detail_scroll_layer = scroll_layer_create(agenda_viewport(bounds));
 #ifdef PBL_ROUND
   scroll_layer_set_shadow_hidden(s_detail_scroll_layer, true);
@@ -308,19 +338,19 @@ static void detail_load(Window *window) {
   const int font = effective_font_mode();
   s_detail_time_layer = text_layer_create(GRect(0, 0, bounds.size.w, 48));
   text_layer_set_font(s_detail_time_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
-  text_layer_set_text_color(s_detail_time_layer, GColorBlack);
+  text_layer_set_text_color(s_detail_time_layer, theme_foreground());
   text_layer_set_background_color(s_detail_time_layer, GColorClear);
   scroll_layer_add_child(s_detail_scroll_layer, text_layer_get_layer(s_detail_time_layer));
   s_detail_title_layer = text_layer_create(GRect(0, 0, bounds.size.w, 48));
   text_layer_set_font(s_detail_title_layer, fonts_get_system_font(
     font == 3 ? FONT_KEY_GOTHIC_28_BOLD : FONT_KEY_GOTHIC_24_BOLD));
-  text_layer_set_text_color(s_detail_title_layer, GColorBlack);
+  text_layer_set_text_color(s_detail_title_layer, theme_foreground());
   text_layer_set_background_color(s_detail_title_layer, GColorClear);
   scroll_layer_add_child(s_detail_scroll_layer, text_layer_get_layer(s_detail_title_layer));
   s_detail_meta_layer = text_layer_create(GRect(0, 0, bounds.size.w, 48));
   text_layer_set_font(s_detail_meta_layer, fonts_get_system_font(
     font == 1 ? FONT_KEY_GOTHIC_18 : (font == 3 ? FONT_KEY_GOTHIC_28 : FONT_KEY_GOTHIC_24)));
-  text_layer_set_text_color(s_detail_meta_layer, GColorBlack);
+  text_layer_set_text_color(s_detail_meta_layer, theme_foreground());
   text_layer_set_background_color(s_detail_meta_layer, GColorClear);
   text_layer_set_text(s_detail_meta_layer, s_detail_meta);
   scroll_layer_add_child(s_detail_scroll_layer, text_layer_get_layer(s_detail_meta_layer));
@@ -419,7 +449,7 @@ static void draw_row_callback(GContext* ctx, const Layer *l, MenuIndex *i, void 
   
   MenuIndex selected = menu_layer_get_selected_index(s_menu_layer);
   bool highlighted = selected.section == i->section && selected.row == i->row;
-  graphics_context_set_text_color(ctx, highlighted ? PBL_IF_COLOR_ELSE(GColorBlack, GColorWhite) : GColorBlack); // Keep highlighted text readable
+  graphics_context_set_text_color(ctx, highlighted ? theme_highlight_foreground() : theme_foreground()); // Keep highlighted text readable
   // Draw the time text in the top half of the row
   graphics_draw_text(ctx, t_b, fonts_get_system_font(time_font()), GRect(9, 0, layer_get_bounds(l).size.w - 14, 20), 0, GTextAlignmentLeft, NULL);
   // Respect the user's system text size.
@@ -454,6 +484,16 @@ static void select_long_click_callback(MenuLayer *m, MenuIndex *i, void *d) {
 static char s_sync_message[32];
 
 static void inbox_handler(DictionaryIterator *iter, void *ctx) {
+  if (solar_theme_receive(iter)) { apply_theme(); return; }
+  Tuple *theme = dict_find(iter, MESSAGE_KEY_THEME_MODE);
+  if (theme && theme->type == TUPLE_CSTRING) {
+    const char *mode = theme->value->cstring;
+    s_theme_mode = strcmp(mode, "night") == 0 ? VG_THEME_NIGHT :
+                   strcmp(mode, "auto") == 0 ? VG_THEME_AUTO : VG_THEME_DAY;
+    persist_write_int(PERSIST_KEY_THEME_MODE, s_theme_mode);
+    apply_theme();
+    // This may share a packet with other preferences.
+  }
   
   Tuple *detail = dict_find(iter, MESSAGE_KEY_DETAIL_TEXT);
   if (detail && detail->type == TUPLE_CSTRING) {
@@ -571,8 +611,7 @@ static void main_load(Window *window) {
   menu_layer_set_center_focused(s_menu_layer, true);
   scroll_layer_set_shadow_hidden(menu_layer_get_scroll_layer(s_menu_layer), true);
 #endif
-  menu_layer_set_normal_colors(s_menu_layer, GColorWhite, GColorBlack); // White background, Black text
-  menu_layer_set_highlight_colors(s_menu_layer, PBL_IF_COLOR_ELSE(GColorCyan, GColorBlack), PBL_IF_COLOR_ELSE(GColorBlack, GColorWhite)); // Cyan highlight, Black text
+  apply_theme();
 
   // Register all the drawing/logic callbacks for the MenuLayer
   menu_layer_set_callbacks(s_menu_layer, NULL, (MenuLayerCallbacks){
@@ -616,6 +655,12 @@ static void main_unload(Window *window) {
 
 // The initialization function that runs immediately when the app opens
 static void init() {
+  solar_theme_load();
+  if (persist_exists(PERSIST_KEY_THEME_MODE)) {
+    int stored = persist_read_int(PERSIST_KEY_THEME_MODE);
+    if (stored >= VG_THEME_DAY && stored <= VG_THEME_AUTO) s_theme_mode = stored;
+  }
+  tick_timer_service_subscribe(MINUTE_UNIT, appearance_tick);
   s_main_window = window_create(); // Create main window
   // Assign the load and unload handlers to the window
   window_set_window_handlers(s_main_window, (WindowHandlers) {
@@ -657,6 +702,7 @@ static void init() {
 
 // The cleanup function that runs right before the app exits completely
 static void deinit() {
+  tick_timer_service_unsubscribe();
   window_destroy(s_main_window); // Destroy the main window
   if (s_detail_window) window_destroy(s_detail_window); // Destroy detail window if it was left open
   if (s_event_array) { free(s_event_array); s_event_array = NULL; } // Free active data memory

@@ -142,6 +142,8 @@ module.exports = [
         "type": "heading",
         "defaultValue": "Preferences"
       },
+      {"type":"select", "messageKey":"THEME_MODE", "label":"Theme", "defaultValue":"day",
+        "options":[{"label":"Day","value":"day"},{"label":"Night","value":"night"},{"label":"Auto","value":"auto"}]},
       {
         "type": "select",
         "messageKey": "FONT_SIZE",

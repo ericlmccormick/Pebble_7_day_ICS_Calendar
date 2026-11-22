@@ -342,9 +342,16 @@ function detailText(event) {
 
 // --- App Event Listeners ---
 
+var weatherTheme;
+function updateSolarTheme() {
+  if (!weatherTheme) weatherTheme = require('./theme-weather').create(Pebble, messageKeys);
+  weatherTheme.setAuto(localStorage.getItem('ics_theme_mode') === 'auto');
+}
+
 // Fired the moment the app boots up on the watch
 Pebble.addEventListener('ready', function() {
   console.log('JS: PebbleKit JS Bridge Initialized.');
+  updateSolarTheme();
   
   // Retrieve saved data from the phone's local storage
   var hasCalendars = getCalendarSources().length > 0;
@@ -411,6 +418,12 @@ Pebble.addEventListener('webviewclosed', function(e) {
   }
   if (dict[messageKeys.FONT_SIZE] !== undefined) {
     watchPrefs.FONT_SIZE = String(dict[messageKeys.FONT_SIZE]);
+  }
+  var mode = dict[messageKeys.THEME_MODE];
+  if (mode === 'day' || mode === 'night' || mode === 'auto') {
+    watchPrefs.THEME_MODE = mode;
+    localStorage.setItem('ics_theme_mode', mode);
+    updateSolarTheme();
   }
   if (Object.keys(watchPrefs).length) {
     Pebble.sendAppMessage(watchPrefs, function(){},
