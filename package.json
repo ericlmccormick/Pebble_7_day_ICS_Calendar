@@ -40,7 +40,8 @@
       "VG_SUNRISE",
       "VG_SUNSET",
       "VG_NEXT_SUNRISE",
-      "VG_NEXT_SUNSET"
+      "VG_NEXT_SUNSET",
+      "WATCH_PREFS"
     ],
     "projectType": "native",
     "resources": {

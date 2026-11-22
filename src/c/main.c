@@ -67,6 +67,9 @@ static CalendarSection s_sections[MAX_SECTIONS];// Array holding the grouping da
 #define PERSIST_KEY_THEME_MODE 437
 static VGThemeMode s_theme_mode = VG_THEME_DAY;
 static bool s_dark;
+static Window *s_settings_window;
+static MenuLayer *s_settings_menu;
+static AppTimer *s_preferences_timer;
 static GColor theme_background(void) { return s_dark ? GColorBlack : GColorWhite; }
 static GColor theme_foreground(void) { return s_dark ? GColorWhite : GColorBlack; }
 static GColor theme_highlight_background(void) {
@@ -82,7 +85,13 @@ static void apply_theme(void) {
     menu_layer_set_normal_colors(s_menu_layer, theme_background(), theme_foreground());
     menu_layer_set_highlight_colors(s_menu_layer, theme_highlight_background(), theme_highlight_foreground());
   }
-  if (s_detail_window && s_detail_time_layer) {
+  if (s_settings_menu) {
+    window_set_background_color(s_settings_window, theme_background());
+    menu_layer_set_normal_colors(s_settings_menu, theme_background(), theme_foreground());
+    menu_layer_set_highlight_colors(s_settings_menu, theme_highlight_background(), theme_highlight_foreground());
+    menu_layer_reload_data(s_settings_menu);
+  }
+  if (s_detail_window && s_detail_meta_layer) {
     window_set_background_color(s_detail_window, theme_background());
     text_layer_set_text_color(s_detail_time_layer, theme_foreground());
     text_layer_set_text_color(s_detail_title_layer, theme_foreground());
@@ -343,7 +352,8 @@ static void detail_load(Window *window) {
   scroll_layer_add_child(s_detail_scroll_layer, text_layer_get_layer(s_detail_time_layer));
   s_detail_title_layer = text_layer_create(GRect(0, 0, bounds.size.w, 48));
   text_layer_set_font(s_detail_title_layer, fonts_get_system_font(
-    font == 3 ? FONT_KEY_GOTHIC_28_BOLD : FONT_KEY_GOTHIC_24_BOLD));
+    font == 3 ? FONT_KEY_GOTHIC_28_BOLD :
+    font == 1 ? FONT_KEY_GOTHIC_18_BOLD : FONT_KEY_GOTHIC_24_BOLD));
   text_layer_set_text_color(s_detail_title_layer, theme_foreground());
   text_layer_set_background_color(s_detail_title_layer, GColorClear);
   scroll_layer_add_child(s_detail_scroll_layer, text_layer_get_layer(s_detail_title_layer));
@@ -465,17 +475,128 @@ static void select_click_callback(MenuLayer *m, MenuIndex *i, void *d) {
   }
 }
 
-// Handles what happens when the user LONG-PRESSES the "Select" (middle) button on a row
-static void select_long_click_callback(MenuLayer *m, MenuIndex *i, void *d) {
-  // 1. Immediately unhide the "Syncing..." toast so the user knows it worked
-  layer_set_hidden(text_layer_get_layer(s_toast_layer), false); 
-  
-  // 2. Send the "Help Signal" to the phone. 
-  // (The JS is programmed to ignore the 30-min timer whenever it receives this)
-  DictionaryIterator *out;
-  app_message_outbox_begin(&out); // Start an outgoing message
-  dict_write_uint8(out, 0, 1); // Write a dummy byte just to trigger the listener
-  app_message_outbox_send(); // Send the message to the phone
+enum { SETTING_THEME, SETTING_TEXT_SIZE, SETTING_SYNC, SETTINGS_COUNT };
+
+static void apply_font_mode(int mode) {
+  s_font_mode = mode;
+  persist_write_int(PERSIST_KEY_FONT_SIZE, mode);
+  menu_layer_reload_data(s_menu_layer);
+  if (s_settings_menu) menu_layer_reload_data(s_settings_menu);
+  if (s_detail_meta_layer) {
+    int font = effective_font_mode();
+    text_layer_set_font(s_detail_title_layer, fonts_get_system_font(
+      font == 3 ? FONT_KEY_GOTHIC_28_BOLD :
+      font == 1 ? FONT_KEY_GOTHIC_18_BOLD : FONT_KEY_GOTHIC_24_BOLD));
+    text_layer_set_font(s_detail_meta_layer, fonts_get_system_font(
+      font == 3 ? FONT_KEY_GOTHIC_28 : font == 1 ? FONT_KEY_GOTHIC_18 : FONT_KEY_GOTHIC_24));
+    layout_detail_content();
+  }
+}
+
+static const char *theme_value(void) {
+  return s_theme_mode == VG_THEME_DAY ? "day" : s_theme_mode == VG_THEME_NIGHT ? "night" : "auto";
+}
+
+static void send_watch_preferences(void *context) {
+  s_preferences_timer = NULL;
+  DictionaryIterator *out = NULL;
+  if (app_message_outbox_begin(&out) != APP_MSG_OK || !out) {
+    s_preferences_timer = app_timer_register(1000, send_watch_preferences, NULL);
+    return;
+  }
+  char font[4];
+  snprintf(font, sizeof(font), "%d", s_font_mode);
+  dict_write_uint8(out, MESSAGE_KEY_WATCH_PREFS, 1);
+  dict_write_cstring(out, MESSAGE_KEY_THEME_MODE, theme_value());
+  dict_write_cstring(out, MESSAGE_KEY_FONT_SIZE, font);
+  app_message_outbox_send();
+}
+
+static void force_sync(void) {
+  DictionaryIterator *out = NULL;
+  if (app_message_outbox_begin(&out) != APP_MSG_OK || !out) return;
+  dict_write_uint8(out, 0, 1);
+  if (app_message_outbox_send() == APP_MSG_OK) {
+    text_layer_set_text(s_toast_layer, "Syncing data...");
+    layer_set_hidden(text_layer_get_layer(s_toast_layer), false);
+  }
+}
+
+static uint16_t settings_rows(MenuLayer *menu, uint16_t section, void *context) {
+  return SETTINGS_COUNT;
+}
+
+static int16_t settings_height(MenuLayer *menu, MenuIndex *index, void *context) {
+  return index->row == SETTING_TEXT_SIZE ? 64 : 44;
+}
+
+static void settings_draw(GContext *ctx, const Layer *layer, MenuIndex *index, void *context) {
+  if (index->row == SETTING_THEME) {
+    const char *const themes[] = {"Day", "Night", "Auto"};
+    menu_cell_basic_draw(ctx, layer, "Theme", themes[s_theme_mode], NULL);
+  } else if (index->row == SETTING_TEXT_SIZE) {
+    const char *const sizes[] = {"System", "Small", "Medium", "Large"};
+    char label[32];
+    snprintf(label, sizeof(label), "Text size: %s", sizes[s_font_mode]);
+    graphics_context_set_text_color(ctx, menu_cell_layer_is_highlighted(layer)
+      ? theme_highlight_foreground() : theme_foreground());
+    GRect bounds = layer_get_bounds(layer);
+    graphics_draw_text(ctx, label, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
+                       GRect(8, 1, bounds.size.w - 16, 20), GTextOverflowModeTrailingEllipsis,
+                       GTextAlignmentLeft, NULL);
+    graphics_draw_text(ctx, "Sample event", fonts_get_system_font(event_font()),
+                       GRect(8, 21, bounds.size.w - 16, 40), GTextOverflowModeTrailingEllipsis,
+                       GTextAlignmentLeft, NULL);
+  } else {
+    menu_cell_basic_draw(ctx, layer, "Force Sync", "Fetch calendar now", NULL);
+  }
+}
+
+static void settings_select(MenuLayer *menu, MenuIndex *index, void *context) {
+  if (index->row == SETTING_SYNC) {
+    window_stack_pop(true);
+    force_sync();
+    return;
+  }
+  if (index->row == SETTING_THEME) {
+    s_theme_mode = (s_theme_mode + 1) % 3;
+    persist_write_int(PERSIST_KEY_THEME_MODE, s_theme_mode);
+    apply_theme();
+  } else {
+    apply_font_mode((s_font_mode + 1) % 4);
+  }
+  if (s_preferences_timer) app_timer_cancel(s_preferences_timer);
+  s_preferences_timer = app_timer_register(350, send_watch_preferences, NULL);
+}
+
+static void settings_load(Window *window) {
+  Layer *root = window_get_root_layer(window);
+  s_settings_menu = menu_layer_create(agenda_viewport(layer_get_bounds(root)));
+#ifdef PBL_ROUND
+  menu_layer_set_center_focused(s_settings_menu, true);
+#endif
+  menu_layer_set_callbacks(s_settings_menu, NULL, (MenuLayerCallbacks){
+    .get_num_rows = settings_rows, .get_cell_height = settings_height,
+    .draw_row = settings_draw, .select_click = settings_select
+  });
+  menu_layer_set_click_config_onto_window(s_settings_menu, window);
+  layer_add_child(root, menu_layer_get_layer(s_settings_menu));
+  apply_theme();
+}
+
+static void settings_unload(Window *window) {
+  menu_layer_destroy(s_settings_menu);
+  s_settings_menu = NULL;
+}
+
+static void select_long_click_callback(MenuLayer *menu, MenuIndex *index, void *context) {
+  if (!s_settings_window) {
+    s_settings_window = window_create();
+    window_set_window_handlers(s_settings_window, (WindowHandlers){
+      .load = settings_load, .unload = settings_unload
+    });
+  }
+  window_stack_push(s_settings_window, true);
 }
 
 // --- Communications ---
@@ -519,9 +640,7 @@ static void inbox_handler(DictionaryIterator *iter, void *ctx) {
   if (font_tuple && font_tuple->type == TUPLE_CSTRING) {
     int mode = atoi(font_tuple->value->cstring);
     if (mode >= 0 && mode <= 3) {
-      s_font_mode = mode;
-      persist_write_int(PERSIST_KEY_FONT_SIZE, mode);
-      menu_layer_reload_data(s_menu_layer);
+      apply_font_mode(mode);
     }
   }
   // 1. Check if the message contains a 12h/24h time format setting update
@@ -656,6 +775,9 @@ static void main_unload(Window *window) {
 // The initialization function that runs immediately when the app opens
 static void init() {
   solar_theme_load();
+#ifdef PBL_TOUCH
+  app_touch_navigation_enable(true);
+#endif
   if (persist_exists(PERSIST_KEY_THEME_MODE)) {
     int stored = persist_read_int(PERSIST_KEY_THEME_MODE);
     if (stored >= VG_THEME_DAY && stored <= VG_THEME_AUTO) s_theme_mode = stored;
@@ -703,6 +825,8 @@ static void init() {
 // The cleanup function that runs right before the app exits completely
 static void deinit() {
   tick_timer_service_unsubscribe();
+  if (s_preferences_timer) app_timer_cancel(s_preferences_timer);
+  if (s_settings_window) window_destroy(s_settings_window);
   window_destroy(s_main_window); // Destroy the main window
   if (s_detail_window) window_destroy(s_detail_window); // Destroy detail window if it was left open
   if (s_event_array) { free(s_event_array); s_event_array = NULL; } // Free active data memory

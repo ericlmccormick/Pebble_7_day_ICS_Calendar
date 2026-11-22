@@ -375,6 +375,18 @@ Pebble.addEventListener('ready', function() {
 // Fired when the watch specifically asks the phone for help (The "Help Signal")
 // This happens if the watch's internal storage gets wiped and it needs data IMMEDIATELY
 Pebble.addEventListener('appmessage', function(e) {
+  var payload = e.payload || {};
+  if (payload.WATCH_PREFS !== undefined) {
+    var mode = String(payload.THEME_MODE);
+    var font = String(payload.FONT_SIZE);
+    if (['day','night','auto'].indexOf(mode) >= 0) {
+      localStorage.setItem('ics_theme_mode', mode);
+      updateSolarTheme();
+    }
+    if (['0','1','2','3'].indexOf(font) >= 0)
+      localStorage.setItem('ics_font_mode', font);
+    return;
+  }
   if (e.payload && e.payload.DETAIL_REQUEST !== undefined) {
     var index = Number(e.payload.DETAIL_REQUEST);
     var message = detailText(latestEvents[index]);
@@ -387,6 +399,12 @@ Pebble.addEventListener('appmessage', function(e) {
 
 // Fired when the user taps the "Settings" gear icon in the Pebble app on their phone
 Pebble.addEventListener('showConfiguration', function() { 
+  var prefs = {};
+  var mode = localStorage.getItem('ics_theme_mode');
+  var font = localStorage.getItem('ics_font_mode');
+  if (mode !== null) prefs.THEME_MODE = mode;
+  if (font !== null) prefs.FONT_SIZE = font;
+  if (Object.keys(prefs).length) clay.setSettings(prefs);
   // Generate and open the Clay settings HTML page
   Pebble.openURL(clay.generateUrl()); 
 });
@@ -418,6 +436,7 @@ Pebble.addEventListener('webviewclosed', function(e) {
   }
   if (dict[messageKeys.FONT_SIZE] !== undefined) {
     watchPrefs.FONT_SIZE = String(dict[messageKeys.FONT_SIZE]);
+    localStorage.setItem('ics_font_mode', watchPrefs.FONT_SIZE);
   }
   var mode = dict[messageKeys.THEME_MODE];
   if (mode === 'day' || mode === 'night' || mode === 'auto') {
